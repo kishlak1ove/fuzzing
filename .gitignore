@@ -1,0 +1,15 @@
+n8n_data/
+.n8n/
+*.sqlite
+*.db
+results/
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+*.log

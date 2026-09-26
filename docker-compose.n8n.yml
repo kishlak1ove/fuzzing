@@ -1,0 +1,31 @@
+services:
+  n8n:
+    build:
+      context: ./n8n
+    image: my-n8n:latest
+    container_name: n8n
+    user: root           
+    ports:
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+      - ./results:/results
+      - ./seeds:/seeds
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - GENERIC_TIMEZONE=Europe/Moscow
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - N8N_SECURE_COOKIE=false
+      - NODES_EXCLUDE=[]
+      - NODE_FUNCTION_ALLOW_BUILTIN=*
+    networks:
+      - secnet
+    restart: unless-stopped
+
+networks:
+  secnet:
+    external: true
+    name: web-fuzz_secnet

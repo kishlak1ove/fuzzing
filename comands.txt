@@ -1,0 +1,33 @@
+./run_baseline.sh
+./run_ffuf.sh /seeds/payloads.txt small
+./run_wfuzz.sh /seeds/payloads.txt small
+./run_ffuf.sh /seeds/SecLists/Fuzzing/special-chars.txt special
+./run_wfuzz.sh /seeds/SecLists/Fuzzing/special-chars.txt special
+chmod +x fuzz.sh run_baseline.sh run_ffuf.sh run_wfuzz.sh
+rm -rf results
+mkdir -p results
+docker exec ffuf touch /results/test-write.txt
+ls -la results/
+docker exec ffuf rm /results/test-write.txt
+echo 'alias dcx="docker compose -f docker-compose.extended.yml"' >> ~/.zshrc
+source ~/.zshrc
+
+mkdir -p results/katana
+docker exec katana katana \
+    -u http://juice-shop:3000 \
+    -jc \
+    -d 3 \
+    -silent \
+    -o /results/katana/endpoints.txt
+
+mkdir -p results/arjun
+docker exec arjun arjun \
+    -u "http://juice-shop:3000/rest/products/search" \
+    -oJ /results/arjun/params.json \
+    -t 10
+
+git clone --depth 1 https://github.com/danielmiessler/SecLists.git seeds/SecLists
+git clone https://github.com/Vlangf/VulnAPI.git targets/VulnAPI
+git clone https://github.com/untra/javaspringvulny.git targets/javaspringvulny
+
+find results -mindepth 1 -delete

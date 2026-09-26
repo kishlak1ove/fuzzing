@@ -1,0 +1,48 @@
+services:
+
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    container_name: juice-shop
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - secnet
+    restart: unless-stopped
+
+  ffuf:
+    build:
+      context: ./ffuf
+    image: my-ffuf:latest
+    container_name: ffuf
+    volumes:
+      - ./seeds:/seeds
+      - ./results:/results
+    networks:
+      - secnet
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  wfuzz:
+    build:
+      context: ./wfuzz
+    image: my-wfuzz:latest
+    container_name: wfuzz
+    volumes:
+      - ./seeds:/seeds
+      - ./results:/results
+    networks:
+      - secnet
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  schemathesis:
+    image: schemathesis/schemathesis:stable
+    container_name: schemathesis
+    volumes:
+      - ./results:/results
+    networks:
+      - secnet
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+networks:
+  secnet:
+    driver: bridge
+    

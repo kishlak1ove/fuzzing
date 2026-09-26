@@ -1,0 +1,84 @@
+services:
+
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    container_name: juice-shop
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - secnet
+    restart: unless-stopped
+
+  ffuf:
+    build:
+      context: ./ffuf
+    image: my-ffuf:latest
+    container_name: ffuf
+    volumes:
+      - ./seeds:/seeds
+      - ./results:/results
+    networks:
+      - secnet
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  wfuzz:
+    build:
+      context: ./wfuzz
+    image: my-wfuzz:latest
+    container_name: wfuzz
+    volumes:
+      - ./seeds:/seeds
+      - ./results:/results
+    networks:
+      - secnet
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  schemathesis:
+    image: schemathesis/schemathesis:stable
+    container_name: schemathesis
+    volumes:
+      - ./results:/results
+    networks:
+      - secnet
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  katana:
+    image: projectdiscovery/katana:latest
+    container_name: katana
+    volumes:
+      - ./seeds:/seeds
+      - ./results:/results
+    networks:
+      - secnet
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  arjun:
+    build:
+      context: ./arjun
+    image: my-arjun:latest
+    container_name: arjun
+    volumes:
+      - ./seeds:/seeds
+      - ./results:/results
+    networks:
+      - secnet
+    entrypoint: ["tail", "-f", "/dev/null"]
+  
+  dashboard:
+    build:
+      context: ./dashboard
+    container_name: dashboard
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./seeds:/seeds
+      - ./results:/results
+    networks:
+      - secnet
+    restart: unless-stopped
+
+
+networks:
+  secnet:
+    driver: bridge
