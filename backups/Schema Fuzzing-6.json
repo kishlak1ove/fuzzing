@@ -1,0 +1,275 @@
+{
+  "name": "Schema Fuzzing",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -16,
+        -208
+      ],
+      "id": "95922ade-d52d-4e3b-bde5-0b0b9a2122b5",
+      "name": "When clicking ‘Execute workflow’",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\n\nconst epFiles = fs.readdirSync('/results')\n  .filter(f => f.endsWith('_endpoints.json'))\n  .map(f => ({ name: f, mtime: fs.statSync(`/results/${f}`).mtime.getTime() }))\n  .sort((a, b) => b.mtime - a.mtime);\n\nif (epFiles.length === 0) throw new Error('No endpoints.json found');\n\nconst discovery = JSON.parse(fs.readFileSync(`/results/${epFiles[0].name}`, 'utf8'));\nconsole.log(`Loaded: ${discovery.runId}, baseUrl=${discovery.baseUrl}, openApiUrl=${discovery.openApiUrl}`);\n\nreturn [{ json: discovery }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "702b41cb-e02b-41bc-903e-0eb30ce4e153",
+      "name": "Read Endpoints File",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=timeout 600 docker exec schemathesis sh -c 'schemathesis run \"{{ $json.openApiUrl }}\" -u \"{{ $json.baseUrl }}\" -c all -n 10 -w 4 --report junit --report-junit-path=/results/$(basename \"{{ $json.schemathesisOut }}\") --coverage-no-report --no-color > /tmp/st.log 2>&1; echo \"EXIT=$?\"; tail -3 /tmp/st.log'"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        496,
+        16
+      ],
+      "id": "3e8d052e-d391-4013-a762-6005a50dd37c",
+      "name": "Schemathesis"
+    },
+    {
+      "parameters": {
+        "command": "=timeout 400 docker exec cats sh -c 'cats -c \"{{ $json.openApiUrl }}\" -s \"{{ $json.baseUrl }}\" -k --stopAfterTimeInSec=240 -o /results/cats_report_{{ $json.runId }} --reportFormat=JUNIT > /tmp/cats.log 2>&1; echo \"EXIT=$?\"; tail -3 /tmp/cats.log'"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        544,
+        240
+      ],
+      "id": "81ef89a2-f306-48f7-b846-9b8ab5033a0f",
+      "name": "CATS"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Read Endpoints File').first().json;\nconst fs = require('fs');\n\nawait new Promise(r => setTimeout(r, 2000));\n\nlet normalized = [];\nlet stats = { total: 0, failures: 0, errors: 0, skipped: 0 };\n\nconst file = cfg.schemathesisOut;\n\nif (fs.existsSync(file)) {\n  try {\n    const xml = fs.readFileSync(file, 'utf8');\n\n    const tsMatch = xml.match(/<testsuites[^>]*errors=\"(\\d+)\"[^>]*failures=\"(\\d+)\"[^>]*skipped=\"(\\d+)\"[^>]*tests=\"(\\d+)\"/);\n    if (tsMatch) {\n      stats.errors   = parseInt(tsMatch[1]);\n      stats.failures = parseInt(tsMatch[2]);\n      stats.skipped  = parseInt(tsMatch[3]);\n      stats.total    = parseInt(tsMatch[4]);\n    }\n\n    const re = /<testcase\\s+name=\"([^\"]*)\"\\s+time=\"([^\"]*)\"[^>]*>([\\s\\S]*?)<\\/testcase>/g;\n    let m;\n    while ((m = re.exec(xml)) !== null) {\n      const fullName = m[1];\n      const time = parseFloat(m[2]) || 0;\n      const body = m[3];\n\n      const isFail  = body.includes('<failure');\n      const isError = body.includes('<error');\n      if (!isFail && !isError) continue;\n\n      const parts = fullName.split(' ');\n      const method = parts[0];\n      const path = parts.slice(1).join(' ') || fullName;\n\n      const msgMatch = body.match(/<(?:failure|error)[^>]*>([\\s\\S]*?)<\\/(?:failure|error)>/);\n      let message = '';\n      if (msgMatch) {\n        message = msgMatch[1]\n          .replace(/1\\. Test Case ID:[^\\n]*\\n/g, '')\n          .replace(/Reproduce with:[\\s\\S]*$/m, '')\n          .replace(/\\s+/g, ' ')\n          .trim()\n          .slice(0, 500);\n      }\n\n      normalized.push({\n        tool: 'schemathesis',\n        method,\n        endpoint: path,\n        payload: fullName,\n        status: 0,\n        length: 0,\n        time_ms: Math.round(time * 1000),\n        message,\n        isFailure: isFail,\n        isError: isError,\n      });\n    }\n\n    console.log(`Schemathesis: ${normalized.length} findings, stats:`, stats);\n  } catch (e) {\n    console.error('Schemathesis parse error:', e.message);\n  }\n} else {\n  console.log('Schemathesis file not found:', file);\n}\n\nreturn [{ json: { ...cfg, schemathesisResults: normalized, schemathesisStats: stats }}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        0
+      ],
+      "id": "2538893f-0145-4bdb-a69d-e62ad97361e7",
+      "name": "Parse Schemathesis",
+      "executeOnce": true,
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Read Endpoints File').first().json;\nconst fs = require('fs');\nconst path = require('path');\n\nawait new Promise(r => setTimeout(r, 3000));\n\nconst normalized = [];\nlet stats = { total: 0, failures: 0, errors: 0, skipped: 0 };\n\n// Ищем папку cats_report_<runId>\nconst reportDir = `/results/cats_report_${cfg.runId}`;\n\nif (fs.existsSync(reportDir)) {\n  console.log('CATS dir found:', reportDir);\n\n  const files = fs.readdirSync(reportDir).filter(f => f.endsWith('.xml'));\n\n  for (const file of files) {\n    try {\n      const xml = fs.readFileSync(path.join(reportDir, file), 'utf8');\n\n      const m = xml.match(/<testsuites[^>]*skipped=\"(\\d+)\"[^>]*errors=\"(\\d+)\"[^>]*failures=\"(\\d+)\"[^>]*tests=\"(\\d+)\"/);\n      if (m) {\n        stats.skipped  = parseInt(m[1]);\n        stats.errors   = parseInt(m[2]);\n        stats.failures = parseInt(m[3]);\n        stats.total    = parseInt(m[4]);\n      }\n\n      const re = /<testcase\\s+name=\"([^\"]*)\"\\s+classname=\"([^\"]*)\"[^>]*>([\\s\\S]*?)<\\/testcase>/g;\n      let tc;\n      while ((tc = re.exec(xml)) !== null) {\n        const body = tc[3];\n        const isFail  = body.includes('<failure');\n        const isError = body.includes('<error');\n        if (!isFail && !isError) continue;\n\n        const msgMatch = body.match(/<(?:failure|error)[^>]*>([\\s\\S]*?)<\\/(?:failure|error)>/);\n        normalized.push({\n          tool: 'cats',\n          endpoint: tc[2],\n          payload: tc[1],\n          status: 0,\n          isFailure: isFail,\n          isError: isError,\n          message: msgMatch ? msgMatch[1].replace(/\\s+/g, ' ').trim().slice(0, 200) : '',\n        });\n\n        if (normalized.length >= 50) break;\n      }\n    } catch (e) {\n      console.error('CATS parse error:', e.message);\n    }\n  }\n} else {\n  console.log('CATS dir not found:', reportDir);\n}\n\nconsole.log(`CATS: ${normalized.length} findings, stats:`, stats);\n\nreturn [{ json: { ...cfg, catsResults: normalized, catsStats: stats }}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        272
+      ],
+      "id": "07045ee3-a6de-4bd2-9c16-b4411283ea94",
+      "name": "Parse CATS",
+      "executeOnce": true,
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst data = $input.first().json;\n\nconst output = {\n  runId: data.runId,\n  target: data.target,\n  vulnType: data.vulnType,\n  schemathesis: {\n    results: data.schemathesisResults || [],\n    stats: data.schemathesisStats || { total: 0, failures: 0, errors: 0, skipped: 0 },\n  },\n  cats: {\n    results: data.catsResults || [],\n    stats: data.catsStats || { total: 0, failures: 0, errors: 0, skipped: 0 },\n  },\n  timestamp: new Date().toISOString(),\n  endpointsFile: data.endpointsFile,\n  dictResultsFile: data.dictResultsFile,\n  schemaResultsFile: data.schemaResultsFile,\n  reportFile: data.reportFile,\n  configFile: data.configFile,\n  baselineFile: data.baselineFile,\n\n  owaspCategory: data.owaspCategory,\n  owaspName: data.owaspName,\n  startTime: data.startTime,\n};\n\nfs.writeFileSync(data.schemaResultsFile, JSON.stringify(output, null, 2));\n\nconsole.log(`Workflow 4 DONE. schemathesis=${output.schemathesis.results.length}, cats=${output.cats.results.length}`);\nconsole.log(`File: ${data.schemaResultsFile}`);\n\nreturn [{ json: output }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        112
+      ],
+      "id": "00b44f84-6bc8-4135-8dc9-e7cb568c587f",
+      "name": "Write Schema Results",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst path = require('path');\n\nawait new Promise(r => setTimeout(r, 3000));\n\nconst cfg = $('Read Endpoints File').first().json;\n\n// === SCHEMATHESIS ===\nlet schemaResults = [];\nlet schemaStats = { total: 0, failures: 0, errors: 0, skipped: 0 };\n\nif (fs.existsSync(cfg.schemathesisOut)) {\n  try {\n    const xml = fs.readFileSync(cfg.schemathesisOut, 'utf8');\n\n    const tsMatch = xml.match(/<testsuites[^>]*errors=\"(\\d+)\"[^>]*failures=\"(\\d+)\"[^>]*skipped=\"(\\d+)\"[^>]*tests=\"(\\d+)\"/);\n    if (tsMatch) {\n      schemaStats.errors   = parseInt(tsMatch[1]);\n      schemaStats.failures = parseInt(tsMatch[2]);\n      schemaStats.skipped  = parseInt(tsMatch[3]);\n      schemaStats.total    = parseInt(tsMatch[4]);\n    }\n\n    const re = /<testcase\\s+name=\"([^\"]*)\"\\s+time=\"([^\"]*)\"[^>]*>([\\s\\S]*?)<\\/testcase>/g;\n    let m;\n    while ((m = re.exec(xml)) !== null) {\n      const isFail  = m[3].includes('<failure');\n      const isError = m[3].includes('<error');\n      if (!isFail && !isError) continue;\n\n      const parts = m[1].split(' ');\n      const msgMatch = m[3].match(/<(?:failure|error)[^>]*>([\\s\\S]*?)<\\/(?:failure|error)>/);\n      schemaResults.push({\n        tool: 'schemathesis',\n        method: parts[0],\n        endpoint: parts.slice(1).join(' ') || m[1],\n        payload: m[1],\n        status: 0, length: 0,\n        time_ms: Math.round((parseFloat(m[2]) || 0) * 1000),\n        message: msgMatch ? msgMatch[1].replace(/\\s+/g, ' ').trim().slice(0, 500) : '',\n        isFailure: isFail, isError,\n      });\n    }\n\n    // Если XML отдал нули — считаем по results\n    if (schemaStats.total === 0) {\n      schemaStats.total    = schemaResults.length;\n      schemaStats.failures = schemaResults.filter(r => r.isFailure).length;\n      schemaStats.errors   = schemaResults.filter(r => r.isError).length;\n    }\n\n    console.log(`Schemathesis: ${schemaResults.length} findings, stats:`, schemaStats);\n  } catch (e) { console.error('Schema parse:', e.message); }\n}\n\n// === CATS ===\nlet catsResults = [];\nlet catsStats = { total: 0, failures: 0, errors: 0, skipped: 0 };\n\nconst catsDir = `/results/cats_report_${cfg.runId}`;\nif (fs.existsSync(catsDir)) {\n  const files = fs.readdirSync(catsDir).filter(f => f.endsWith('.xml'));\n\n  for (const file of files) {\n    try {\n      const xml = fs.readFileSync(path.join(catsDir, file), 'utf8');\n\n      // Пробуем вытащить счётчики из <testsuites>\n      const m = xml.match(/<testsuites[^>]*skipped=\"(\\d+)\"[^>]*errors=\"(\\d+)\"[^>]*failures=\"(\\d+)\"[^>]*tests=\"(\\d+)\"/);\n      if (m) {\n        catsStats.skipped  = parseInt(m[1]);\n        catsStats.errors   = parseInt(m[2]);\n        catsStats.failures = parseInt(m[3]);\n        catsStats.total    = parseInt(m[4]);\n      }\n\n      const re = /<testcase\\s+name=\"([^\"]*)\"\\s+classname=\"([^\"]*)\"[^>]*>([\\s\\S]*?)<\\/testcase>/g;\n      let tc;\n      while ((tc = re.exec(xml)) !== null) {\n        const isFail  = tc[3].includes('<failure');\n        const isError = tc[3].includes('<error');\n        if (!isFail && !isError) continue;\n\n        const msgMatch = tc[3].match(/<(?:failure|error)[^>]*>([\\s\\S]*?)<\\/(?:failure|error)>/);\n        catsResults.push({\n          tool: 'cats',\n          endpoint: tc[2],\n          payload: tc[1],\n          status: 0,\n          isFailure: isFail,\n          isError: isError,\n          message: msgMatch ? msgMatch[1].replace(/\\s+/g, ' ').trim().slice(0, 200) : '',\n        });\n        if (catsResults.length >= 50) break;\n      }\n    } catch (e) { console.error('CATS parse:', e.message); }\n  }\n\n  // ⚠️ FALLBACK: если XML-счётчики нули — считаем по результатам\n  if (catsStats.total === 0) {\n    catsStats.total    = catsResults.length;\n    catsStats.failures = catsResults.filter(r => r.isFailure).length;\n    catsStats.errors   = catsResults.filter(r => r.isError).length;\n  }\n\n  console.log(`CATS: ${catsResults.length} findings, stats:`, catsStats);\n} else {\n  console.log('CATS dir not found:', catsDir);\n}\n\nreturn [{ json: {\n  ...cfg,\n  schemathesisResults: schemaResults,\n  schemathesisStats: schemaStats,\n  catsResults,\n  catsStats,\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        144
+      ],
+      "id": "94881b7c-0298-4a68-ba9b-76f83155016c",
+      "name": "Parse Schema",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        96
+      ],
+      "id": "0d62e921-c3e1-4393-a47c-60bf8d31618e",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "CyntrrFOfbG0fsfW",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/CyntrrFOfbG0fsfW",
+          "cachedResultName": "Analyze"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1648,
+        112
+      ],
+      "id": "2c525c75-97ad-42c5-b43a-e689e7cc7926",
+      "name": "Call 'Analyze'"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Read Endpoints File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Endpoints File": {
+      "main": [
+        [
+          {
+            "node": "Schemathesis",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "CATS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schemathesis": {
+      "main": [
+        [
+          {
+            "node": "Parse Schemathesis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CATS": {
+      "main": [
+        [
+          {
+            "node": "Parse CATS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Schemathesis": {
+      "main": [
+        [
+          {
+            "node": "Parse Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse CATS": {
+      "main": [
+        [
+          {
+            "node": "Parse Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Schema": {
+      "main": [
+        [
+          {
+            "node": "Write Schema Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Read Endpoints File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Schema Results": {
+      "main": [
+        [
+          {
+            "node": "Call 'Analyze'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "c4367b73-7b03-40ef-b1d0-5ce32a243bd6",
+  "meta": {
+    "instanceId": "e8ba1e36580f610ee135711730f78334e2d8d2defdeb3a07a80ab9e59e294d90"
+  },
+  "nodeGroups": [],
+  "id": "KtJtK7r3BUkbBVi6",
+  "tags": []
+}

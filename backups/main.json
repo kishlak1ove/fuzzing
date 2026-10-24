@@ -1,0 +1,704 @@
+{
+  "name": "main",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Запуск фаззинга",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Target URL",
+              "fieldName": "Target URL",
+              "defaultValue": "http://vulnapi:5035/sqli/search",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Vulnerability Type",
+              "fieldType": "dropdown",
+              "defaultValue": "sqli",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "sqli"
+                  },
+                  {
+                    "option": "xss"
+                  },
+                  {
+                    "option": "lfi"
+                  },
+                  {
+                    "option": "cmd"
+                  },
+                  {
+                    "option": "ssti"
+                  },
+                  {
+                    "option": "special"
+                  },
+                  {
+                    "option": "universal"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Depth",
+              "fieldType": "number",
+              "fieldName": "Depth",
+              "defaultValue": "1"
+            },
+            {
+              "fieldLabel": "Auth Token",
+              "fieldName": "Auth Token"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -1280,
+        304
+      ],
+      "id": "9971af73-db6b-49e5-870f-661e7dd67165",
+      "name": "Form Trigger",
+      "webhookId": "01fee729-abb2-4308-8ce1-24885dfa1162"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst data = input.body || input;\n\nconst target     = data['Target URL'] || data.target;\nconst vulnType   = data['Vulnerability Type'] || 'sqli';\nconst depth      = parseInt(data.Depth) || 2;\nconst authToken  = data['Auth Token'] || '';\n\nif (!target || !target.startsWith('http')) {\n  throw new Error('Invalid target: ' + target);\n}\n\nconst WORDLISTS = {\n  sqli:    '/seeds/SecLists/Fuzzing/Databases/SQLi/Generic-SQLi.txt',\n  xss:     '/seeds/SecLists/Fuzzing/XSS/XSS-Jhaddix.txt',\n  lfi:     '/seeds/SecLists/Fuzzing/LFI/LFI-Jhaddix.txt',\n  cmd:     '/seeds/SecLists/Fuzzing/command-injection-commix.txt',\n  ssti:    '/seeds/SecLists/Fuzzing/template-engines-special-vars.txt',\n  special: '/seeds/SecLists/Fuzzing/special-chars.txt',\n  universal: '/seeds/payloads.txt',\n};\n\nconst wordlist = WORDLISTS[vulnType];\nif (!wordlist) throw new Error('Unknown vuln_type: ' + vulnType);\n\nconst ts  = new Date().toISOString().replace(/[:.]/g, '-');\nconst slug = target.replace(/https?:\\/\\//, '').replace(/[^a-z0-9]/gi, '_');\nconst experiment = `n8n_${vulnType}_${slug}_${ts}`;\n\nreturn [{\n  json: {\n    target, vulnType, depth, authToken, wordlist, ts, slug, experiment,\n    runId: experiment,\n    katanaOut: `/results/katana_${experiment}.txt`,\n    ffufOut:   `/results/ffuf_${experiment}.json`,\n    wfuzzOut:  `/results/wfuzz_${experiment}.txt`,\n    feroxbusterOut: `/results/feroxbuster_${experiment}.json`,\n    reportOut: `/results/report_${experiment}.json`,\n    baselineUrl: `${target}${target.includes('?') ? '&' : '?'}id=1`,\n    baselineOut: `/results/baseline_${experiment}.json`,\n    startTime: Date.now(),\n    baseUrl: (target.match(/^(https?:\\/\\/[^\\/]+)/) || [])[1] || target,\n    openApiUrl: `${(target.match(/^(https?:\\/\\/[^\\/]+)/) || [])[1] || target}/openapi.json`,\n    schemathesisOut: `/results/schemathesis_${experiment}.xml`,\n    arjunOut: `/results/arjun_${experiment}.json`,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1024,
+        304
+      ],
+      "id": "2ceb76d6-17b6-4cd3-8107-ece0654d5c8d",
+      "name": "Validate Config",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.baselineUrl }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -784,
+        304
+      ],
+      "id": "4452d9a4-dcf8-46b0-bb1d-9cdf8a025ac1",
+      "name": "HTTP — Baseline",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst resp = $input.first().json;\nconst fs = require('fs');\n\nconst rawBody = resp.data ?? resp.body ?? '';\n\nlet bodyStr = '';\nif (typeof rawBody === 'string') {\n  bodyStr = rawBody;\n} else if (rawBody && typeof rawBody === 'object') {\n  bodyStr = JSON.stringify(rawBody);\n}\n\nconst status = resp.statusCode || resp.status || 0;\n\nconst clHeader = resp.headers?.['content-length'];\nconst length = clHeader ? parseInt(clHeader) : bodyStr.length;\n\nconst baseline = {\n  url: cfg.baselineUrl,\n  status: status,\n  length: length,\n  timestamp: new Date().toISOString(),\n};\n\ntry {\n  fs.writeFileSync(cfg.baselineOut, JSON.stringify(baseline, null, 2));\n  console.log('Baseline saved:', baseline);\n} catch (e) {\n  console.error('baseline write failed:', e.message);\n}\n\nreturn [{\n  json: {\n    ...cfg,\n    baseline: baseline,\n    baselineLength: baseline.length,\n    baselineStatus: baseline.status,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -544,
+        304
+      ],
+      "id": "1f84a297-330e-4428-92d8-b99b16b3e46d",
+      "name": "Save Baseline",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=docker exec puppeteer node /app/extract.js \"{{ $json.target }}\" \"/results/puppeteer_{{ $json.runId }}.json\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -336,
+        64
+      ],
+      "id": "17b6ab6f-ad14-4bc2-93f8-803f41aa210b",
+      "name": "Puppeteer",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst fs = require('fs');\n\nawait new Promise(r => setTimeout(r, 2000));\n\nlet xhrEndpoints = [];\nlet formParams = [];\n\nconst file = `/results/puppeteer_${cfg.runId}.json`;\n\nif (fs.existsSync(file)) {\n  try {\n    const data = JSON.parse(fs.readFileSync(file, 'utf8'));\n\n    xhrEndpoints = (data.xhr || [])\n      .map(r => r.url.split('?')[0])\n      .filter(u => u.startsWith('http'))\n      .filter((v, i, a) => a.indexOf(v) === i);\n\n    formParams = (data.forms || [])\n      .map(f => f.name)\n      .filter(n => n && !n.includes('['))\n      .filter((v, i, a) => a.indexOf(v) === i);\n  } catch (e) {\n    console.error('Puppeteer parse error:', e.message);\n  }\n}\n\nreturn [{\n  json: {\n    ...cfg,\n    puppeteerXhr: xhrEndpoints,\n    puppeteerForms: formParams,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "e1f81722-fcd5-4fc1-bbcc-696fdc5f7984",
+      "name": "Parse Puppeteer",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=docker exec linkfinder python /app/linkfinder.py -i \"{{ $json.target }}\" -d -o cli"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -256,
+        224
+      ],
+      "id": "cc6346ad-7448-4e7f-aefe-fe1344959c26",
+      "name": "LinkFinder",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst fs = require('fs');\n\nconst raw = $input.first().json.stdout || '';\n\nconst paths = raw\n  .split('\\n')\n  .map(line => line.trim())\n  .filter(line => line && !line.startsWith('Running against'))\n  .filter(line => line.startsWith('/') || line.startsWith('http'))\n  .filter(line => {\n    if (/^https?:\\/\\/(www\\.)?(owasp|youtube|fonts|google|w3|testnets|ipinfo|api\\.ipinfo)/i.test(line)) return false;\n    if (/\\.(js|css|png|jpg|jpeg|svg|woff2?|ttf|ico|map)$/i.test(line)) return false;\n    return true;\n  })\n  .filter((v, i, a) => a.indexOf(v) === i);\n\nconst outFile = `/results/linkfinder_${cfg.runId}.txt`;\nfs.writeFileSync(outFile, paths.join('\\n'));\n\nreturn [{\n  json: {\n    ...cfg,\n    linkfinderPaths: paths,\n    linkfinderCount: paths.length,\n    linkfinderOut: outFile,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -16,
+        192
+      ],
+      "id": "d1d70b7a-6eca-4007-ac23-66059ac5abbc",
+      "name": "Parse LinkFinder",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=docker exec katana katana -u {{ $json.target }} -jc -d {{ $json.depth }} -silent -o {{ $json.katanaOut }}"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -208,
+        432
+      ],
+      "id": "19f65585-2852-4ffb-8424-ac7c22a3bc9d",
+      "name": "Katana"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst fs = require('fs');\n\nawait new Promise(r => setTimeout(r, 1500));\n\nlet content = '';\ntry {\n  content = fs.readFileSync(cfg.katanaOut, 'utf8');\n} catch (e) {\n  content = cfg.target + '\\n';\n}\n\nconst endpoints = content\n  .split('\\n')\n  .map(l => l.trim())\n  .filter(l => l && l.includes('http'))\n  .filter(l => !/\\.(png|jpg|jpeg|gif|css|js|mjs|jsx|ts|tsx|woff2?|ico|svg|map|ttf|eot|webp|avif|mp4|webm)$/i.test(l))\n  .filter(l => {\n    if (l === cfg.target) return true;\n    if (l.includes('?')) return true;\n    if (/\\/(rest|api|admin|user|search|login|products?|sqli|xss|ssti|rce|ptrav|xxe|redirect)/i.test(l)) return true;\n    return false;\n  })\n  .filter((v, i, a) => a.indexOf(v) === i);\n\nif (!endpoints.includes(cfg.target)) {\n  endpoints.unshift(cfg.target);\n}\n\nreturn [{\n  json: {\n    ...cfg,\n    endpoints,\n    endpointCount: endpoints.length,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        48,
+        400
+      ],
+      "id": "8984f0b5-11e1-4a87-8755-23672971889d",
+      "name": "Parse katana",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.openApiUrl }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -192,
+        656
+      ],
+      "id": "376cb289-a70e-40da-b223-2504801183e5",
+      "name": "Fetch OpenAPI",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst resp = $input.first().json;\n\nconst paths = [];\n\ntry {\n  const body = resp.data ?? resp.body;\n  const spec = typeof body === 'string' ? JSON.parse(body) : body;\n\n  if (spec && spec.paths) {\n    for (const path of Object.keys(spec.paths)) {\n      const cleanPath = path.replace(/\\{[^}]+\\}/g, 'FUZZ');\n      paths.push(`${cfg.baseUrl}${cleanPath}`);\n    }\n  }\n  console.log(`OpenAPI endpoints: ${paths.length}`);\n} catch (e) {\n  console.error('OpenAPI parse error:', e.message);\n}\n\nreturn [{\n  json: {\n    ...cfg,\n    openApiEndpoints: paths,\n    openApiCount: paths.length,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        624
+      ],
+      "id": "65a5af48-8269-49c2-854e-1a5246913e64",
+      "name": "Parse OpenAPI",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst items = $input.all();\n\nlet katanaEndpoints = [];\nlet linkfinderPaths = [];\nlet openApiEndpoints = [];\nlet puppeteerXhr = [];\n\nfor (const item of items) {\n  const d = item.json;\n  if (Array.isArray(d.endpoints) && d.endpoints.length > 0) katanaEndpoints = d.endpoints;\n  if (Array.isArray(d.linkfinderPaths)) linkfinderPaths = d.linkfinderPaths;\n  if (Array.isArray(d.openApiEndpoints)) openApiEndpoints = d.openApiEndpoints;\n  if (Array.isArray(d.puppeteerXhr)) puppeteerXhr = d.puppeteerXhr;\n}\n\nlet allEndpoints = [\n  ...katanaEndpoints,\n  ...linkfinderPaths.filter(p => p.startsWith('/')).map(p => `${cfg.baseUrl}${p}`),\n  ...openApiEndpoints,\n  ...puppeteerXhr,\n];\n\nallEndpoints = allEndpoints\n  .filter(ep => !/\\.(js|css|png|jpg|jpeg|svg|woff2?|ttf|ico|map)$/i.test(ep))\n  .filter((v, i, a) => a.indexOf(v) === i);\n\nif (allEndpoints.length === 0) allEndpoints.push(cfg.target);\n\nconsole.log(`Merged: katana=${katanaEndpoints.length}, lf=${linkfinderPaths.length}, openapi=${openApiEndpoints.length}, puppeteer=${puppeteerXhr.length}, total=${allEndpoints.length}`);\n\nreturn [{\n  json: {\n    ...cfg,\n    endpoints: allEndpoints,\n    endpointCount: allEndpoints.length,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        160
+      ],
+      "id": "dc529b2f-c0f7-4f5e-99a2-a6ab78289585",
+      "name": "Merge Endpoints",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $input.first().json;\n\n// Берём эндпоинты из Merge Endpoints\nconst endpoints = (cfg.endpoints || [])\n  .filter(ep => !/\\.(js|css|png|jpg|jpeg|svg|woff2?|ttf|ico|map)$/i.test(ep))\n  .filter((v, i, a) => a.indexOf(v) === i);\n\nif (endpoints.length === 0) {\n  endpoints.push(cfg.target);\n}\n\nconst DEFAULT_PARAMS = ['id', 'q', 'search', 'query', 'file', 'url', 'name'];\n\nconst allParams = {};\nfor (const ep of endpoints) {\n  allParams[ep] = DEFAULT_PARAMS;\n}\n\nconsole.log(`Expand: ${endpoints.length} endpoints, ${DEFAULT_PARAMS.length} params each`);\n\nreturn [{\n  json: {\n    ...cfg,\n    allParams,\n    endpointCount: endpoints.length,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        544,
+        320
+      ],
+      "id": "97aaf8c7-136a-4870-ab24-162b825572ac",
+      "name": "Expand Endpoints",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $input.first().json;\nconst allParams = cfg.allParams || {};\nconst puppeteerParams = cfg.puppeteerForms || [];\n\nfor (const [endpoint, params] of Object.entries(allParams)) {\n  allParams[endpoint] = [...new Set([...params, ...puppeteerParams])];\n}\n\n// СТРОГИЕ паттерны — только реально релевантные эндпоинты\nconst VULN_PATTERNS = {\n  sqli:      /^(.*\\/)?(sqli(\\/(login|search))?|search|login|api\\/users)\\/?$/i,\n  xss:       /^(.*\\/)?(xss(\\/(reflected|stored|dom))?|search|contact)\\/?$/i,\n  cmd:       /^(.*\\/)?(rce(\\/(ping|eval))?|ping)\\/?$/i,\n  ptrav:     /^(.*\\/)?(ptrav(\\/(read|download))?|page)\\/?$/i,\n  ssti:      /^(.*\\/)?(ssti|template)\\/?$/i,\n  lfi:       /^(.*\\/)?(ptrav|page|file|read)\\/?$/i,\n  redirect:  /^(.*\\/)?(redir(ect)?(\\/(go|login|redirect))?|open_redirect)\\/?$/i,\n  xxe:       /^(.*\\/)?(xxe(\\/parse)?|upload_file)\\/?$/i,\n  special:   /./,\n  universal: /./,\n};\n\nconst VULN_PARAMS = {\n  sqli:      ['id', 'search', 'query'],\n  xss:       ['query', 'q', 'input'],\n  cmd:       ['host', 'ip', 'cmd'],\n  ptrav:     ['file', 'path', 'filename'],\n  ssti:      ['template', 'name', 'input'],\n  lfi:       ['file', 'page', 'include'],\n  redirect:  ['url', 'redirect_to', 'next'],\n  xxe:       ['xml', 'data'],\n  special:   ['id', 'q', 'search'],\n  universal: ['id', 'q', 'search'],\n};\n\nconst pattern     = VULN_PATTERNS[cfg.vulnType] || /./;\nconst paramsToUse = VULN_PARAMS[cfg.vulnType]   || ['id'];\n\nconst jobs = [];\nlet i = 0;\n\nfor (const [endpoint, _] of Object.entries(allParams)) {\n  if (!pattern.test(endpoint)) continue;\n\n  for (const param of paramsToUse) {\n    jobs.push({\n      endpoint, param,\n      target: cfg.target,\n      wordlist: cfg.wordlist,\n      vulnType: cfg.vulnType,\n      authToken: cfg.authToken,\n      runId: cfg.runId,\n      experiment: cfg.experiment,\n      slug: cfg.slug,\n      ts: cfg.ts,\n      ffufOut:  `/results/ffuf_${cfg.experiment}_${i}.json`,\n      wfuzzOut: `/results/wfuzz_${cfg.experiment}_${i}.txt`,\n    });\n    i++;\n    if (i >= 30) break;   // ← ЖЁСТКИЙ ЛИМИТ 30 ЗАДАЧ\n  }\n  if (i >= 30) break;\n}\n\nconsole.log(`Build jobs: ${jobs.length} tasks (endpoints: ${new Set(jobs.map(j => j.endpoint)).size}, vuln: ${cfg.vulnType})`);\n\nreturn jobs.map(j => ({ json: j }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        816,
+        368
+      ],
+      "id": "48294acc-9135-420f-abe6-915901af7a95",
+      "name": "Build jobs",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "executeOnce": false,
+        "command": "=docker exec ffuf ffuf -u \"{{ $json.endpoint }}?{{ $json.param }}=FUZZ\" -w {{ $json.wordlist }} -mc all -t 40 -k -o \"{{ $json.ffufOut }}\" -of json -s"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        224
+      ],
+      "id": "5f980dbb-cf52-4cee-b2b7-10fbb418ca0e",
+      "name": "fluff"
+    },
+    {
+      "parameters": {
+        "executeOnce": false,
+        "command": "=timeout 30 docker exec wfuzz wfuzz -z file,{{ $json.wordlist }},urlencode -u \"{{ $json.endpoint }}?{{ $json.param }}=FUZZ\" -t 40 -f \"{{ $json.wfuzzOut }}\" 2>&1 | tail -3 || true"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1072,
+        432
+      ],
+      "id": "bbf7ad56-df58-4da8-afc3-871473dc7b32",
+      "name": "wfuzz"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst fs = require('fs');\nconst path = require('path');\n\nawait new Promise(r => setTimeout(r, 2000));\n\nconst jobs = $('Build jobs').all().map(item => item.json);\nconst normalized = [];\n\nif (!fs.existsSync('/results')) {\n  return [{ json: { ...cfg, normalized, totalResults: 0 } }];\n}\n\nconst files = fs.readdirSync('/results').filter(f =>\n  f.startsWith(`ffuf_${cfg.experiment}`) && f.endsWith('.json')\n);\n\nfor (const file of files) {\n  try {\n    const full = path.join('/results', file);\n    const data = JSON.parse(fs.readFileSync(full, 'utf8'));\n    const results = data.results || [];\n\n    const m = file.match(/_(\\d+)\\.json$/);\n    const idx = m ? parseInt(m[1]) : -1;\n    const job = idx >= 0 && idx < jobs.length ? jobs[idx] : null;\n\n    const endpoint = job ? job.endpoint : cfg.target;\n    const param    = job ? job.param    : `param_${idx}`;\n\n    for (const r of results) {\n      normalized.push({\n        tool: 'ffuf',\n        file: file,\n        param: param,\n        endpoint: endpoint,\n        payload: (r.input && r.input.FUZZ) || '',\n        status: r.status,\n        length: r.length,\n        time_ms: Math.round((r.duration || 0) / 1_000_000),\n        contentType: r['content-type'] || '',\n      });\n    }\n  } catch (e) {\n    console.error('Parse ffuf error:', file, e.message);\n  }\n}\n\nconsole.log(`Parsed ffuf: ${normalized.length} results from ${files.length} files`);\n\nreturn [{ json: { ...cfg, normalized, totalResults: normalized.length } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        320
+      ],
+      "id": "1be91c53-9c9c-4ff8-9a54-d566aae64805",
+      "name": "Parse ffuf",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst fs = require('fs');\nconst path = require('path');\n\nawait new Promise(r => setTimeout(r, 2000));\n\nconst jobs = $('Build jobs').all().map(item => item.json);\nconst normalized = [];\n\nif (!fs.existsSync('/results')) {\n  return [{ json: { ...cfg, normalized, totalResults: 0 } }];\n}\n\nconst files = fs.readdirSync('/results').filter(f =>\n  f.startsWith(`wfuzz_${cfg.experiment}`) && f.endsWith('.txt')\n);\n\nfor (const file of files) {\n  try {\n    const full = path.join('/results', file);\n    const text = fs.readFileSync(full, 'utf8');\n    const lines = text.split('\\n');\n\n    const m = file.match(/_(\\d+)\\.txt$/);\n    const idx = m ? parseInt(m[1]) : -1;\n    const job = idx >= 0 && idx < jobs.length ? jobs[idx] : null;\n\n    const endpoint = job ? job.endpoint : cfg.target;\n    const param    = job ? job.param    : `param_${idx}`;\n\n    for (const line of lines) {\n      const match = line.match(/^\\s*\\d+:\\s+C=(\\d+)\\s+(\\d+)\\s+L\\s+(\\d+)\\s+W\\s+(\\d+)\\s+Ch\\s+\"(.*)\"/);\n      if (!match) continue;\n\n    normalized.push({\n      tool: 'wfuzz',\n      file: file,\n      param: param,\n      endpoint: endpoint,\n      payload: (match[5] || '').trim(),\n      status:  parseInt(match[1]),\n      length:  parseInt(match[4]),   // ← chars (129), как у ffuf\n      words:   parseInt(match[3]),\n      chars:   parseInt(match[4]),\n      time_ms: 0,\n    });\n    }\n  } catch (e) {\n    console.error('Parse wfuzz error:', file, e.message);\n  }\n}\n\nconsole.log(`Parsed wfuzz: ${normalized.length} results from ${files.length} files`);\n\nreturn [{ json: { ...cfg, normalized, totalResults: normalized.length } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1296,
+        464
+      ],
+      "id": "f6d19f5e-d270-46bf-92bd-ef24195e574c",
+      "name": "Parse wfuzz",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=timeout 300 docker exec schemathesis sh -c 'schemathesis run {{ $json.openApiUrl }} -u {{ $json.baseUrl }} -c all -n 3 -w 1 --report junit --report-junit-path={{ $json.schemathesisOut }} --coverage-no-report --no-color > /tmp/st.log 2>&1; echo \"EXIT=$?\"; tail -5 /tmp/st.log'"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -224,
+        944
+      ],
+      "id": "36daec75-9b66-471c-9014-ff093628c553",
+      "name": "Schemathesis"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst fs = require('fs');\n\nawait new Promise(r => setTimeout(r, 2000));\n\nlet normalized = [];\nlet stats = { total: 0, failures: 0, errors: 0, skipped: 0 };\n\nconst file = cfg.schemathesisOut;\n\nif (fs.existsSync(file)) {\n  try {\n    const xml = fs.readFileSync(file, 'utf8');\n\n    // Счётчики из <testsuites> (порядок: errors, failures, skipped, tests)\n    const tsMatch = xml.match(/<testsuites[^>]*errors=\"(\\d+)\"[^>]*failures=\"(\\d+)\"[^>]*skipped=\"(\\d+)\"[^>]*tests=\"(\\d+)\"/);\n    if (tsMatch) {\n      stats.errors   = parseInt(tsMatch[1]);\n      stats.failures = parseInt(tsMatch[2]);\n      stats.skipped  = parseInt(tsMatch[3]);\n      stats.total    = parseInt(tsMatch[4]);\n    }\n\n    // Отдельные testcase — только те, у которых есть <failure> или <error>\n    const re = /<testcase\\s+name=\"([^\"]*)\"\\s+time=\"([^\"]*)\"[^>]*>([\\s\\S]*?)<\\/testcase>/g;\n    let m;\n    while ((m = re.exec(xml)) !== null) {\n      const fullName = m[1];\n      const time = parseFloat(m[2]) || 0;\n      const body = m[3];\n\n      const isFail  = body.includes('<failure');\n      const isError = body.includes('<error');\n      if (!isFail && !isError) continue;\n\n      // Разбиваем \"POST /redirect/login\" на method и path\n      const parts = fullName.split(' ');\n      const method = parts[0];\n      const path = parts.slice(1).join(' ') || fullName;\n\n      // Извлекаем текст из <failure>...</failure>\n      const msgMatch = body.match(/<(?:failure|error)[^>]*>([\\s\\S]*?)<\\/(?:failure|error)>/);\n      let message = '';\n      if (msgMatch) {\n        message = msgMatch[1]\n          .replace(/1\\. Test Case ID:[^\\n]*\\n/g, '')\n          .replace(/Reproduce with:[\\s\\S]*$/m, '')\n          .replace(/\\s+/g, ' ')\n          .trim()\n          .slice(0, 500);\n      }\n\n      normalized.push({\n        tool: 'schemathesis',\n        method: method,\n        endpoint: path,\n        payload: fullName,\n        status: 0,\n        length: 0,\n        time_ms: Math.round(time * 1000),\n        message: message,\n        isFailure: isFail,\n        isError: isError,\n      });\n    }\n\n    console.log('Schemathesis parsed:', normalized.length, 'findings, stats:', stats);\n  } catch (e) {\n    console.error('Schemathesis parse error:', e.message);\n  }\n}\n\nreturn [{\n  json: {\n    ...cfg,\n    normalized,\n    totalResults: normalized.length,\n    schemathesisStats: stats,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        688
+      ],
+      "id": "cc0e35e0-1e0b-41b8-a0bd-26eb49c77a1d",
+      "name": "Parse Schemathesis",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=timeout 300 docker exec cats sh -c 'cats -c {{ $json.openApiUrl }} -s {{ $json.baseUrl }} -k --stopAfterTimeInSec=240 -o /results/cats_report_{{ $json.runId }} --reportFormat=JUNIT > /tmp/cats.log 2>&1; echo \"EXIT=$?\"; tail -3 /tmp/cats.log'"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -272,
+        1152
+      ],
+      "id": "397fd6fe-c1dc-4b62-b3d9-c21d00ed2b48",
+      "name": "CATS"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst fs = require('fs');\nconst path = require('path');\n\nawait new Promise(r => setTimeout(r, 3000));\n\nconst normalized = [];\nlet stats = { total: 0, failures: 0, errors: 0, skipped: 0 };\n\n// Ищем ВСЕ папки cats_report_*\nconst allDirs = fs.readdirSync('/results')\n  .filter(f => f.startsWith('cats_report_'))\n  .map(f => ({\n    name: f,\n    mtime: fs.statSync(path.join('/results', f)).mtime.getTime(),\n  }))\n  .sort((a, b) => b.mtime - a.mtime);  // свежие сверху\n\nconsole.log('CATS dirs found:', allDirs.length);\n\nif (allDirs.length > 0) {\n  const reportDir = path.join('/results', allDirs[0].name);\n  console.log('Using CATS dir:', reportDir);\n\n  const files = fs.readdirSync(reportDir).filter(f => f.endsWith('.xml'));\n\n  for (const file of files) {\n    try {\n      const xml = fs.readFileSync(path.join(reportDir, file), 'utf8');\n\n      // Счётчики из <testsuites>\n      const m = xml.match(/<testsuites[^>]*skipped=\"(\\d+)\"[^>]*errors=\"(\\d+)\"[^>]*failures=\"(\\d+)\"[^>]*tests=\"(\\d+)\"/);\n      if (m) {\n        stats.skipped = parseInt(m[1]);\n        stats.errors = parseInt(m[2]);\n        stats.failures = parseInt(m[3]);\n        stats.total = parseInt(m[4]);\n        console.log('CATS stats:', stats);\n      }\n\n      // Находим findings (те, у которых есть <failure> или <error>)\n      const re = /<testcase\\s+name=\"([^\"]*)\"\\s+classname=\"([^\"]*)\"[^>]*>([\\s\\S]*?)<\\/testcase>/g;\n      let tc;\n      while ((tc = re.exec(xml)) !== null) {\n        const body = tc[3];\n        const isFail = body.includes('<failure');\n        const isError = body.includes('<error');\n        if (!isFail && !isError) continue;\n\n        const msgMatch = body.match(/<(?:failure|error)[^>]*>([\\s\\S]*?)<\\/(?:failure|error)>/);\n        normalized.push({\n          tool: 'cats',\n          endpoint: tc[2],\n          payload: tc[1],\n          status: 0,\n          isFailure: isFail,\n          isError: isError,\n          message: msgMatch ? msgMatch[1].replace(/\\s+/g, ' ').trim().slice(0, 200) : '',\n        });\n\n        if (normalized.length >= 50) break;\n      }\n    } catch (e) {\n      console.error('CATS parse error:', e.message);\n    }\n  }\n}\n\nconsole.log(`CATS parsed: ${normalized.length} findings`);\n\nreturn [{\n  json: {\n    ...cfg,\n    normalized,\n    totalResults: normalized.length,\n    catsStats: stats,\n    catsFindings: normalized.slice(0, 30),\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1216,
+        912
+      ],
+      "id": "72fcdc4b-f343-49eb-8acb-65f201ec7d81",
+      "name": "Parse CATS",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// === БЕЗОПАСНОЕ ЧТЕНИЕ ВСЕХ ПАРСЕРОВ ===\n// Если какой-то парсер не выполнился — берём пустую заглушку\nconst emptyFFUF = {\n  normalized: [],\n  runId: '', target: '', vulnType: '', wordlist: '', reportOut: ''\n};\n\nlet ffufData  = emptyFFUF;\nlet wfuzzData = { normalized: [] };\nlet schemaData = { normalized: [], schemathesisStats: { failures: 0, errors: 0, skipped: 0 } };\nlet catsData = { normalized: [], catsStats: { total: 0, failures: 0, errors: 0, skipped: 0 } };\n\ntry { ffufData   = $('Parse ffuf').first().json;        } catch (e) { console.warn('Parse ffuf missing'); }\ntry { wfuzzData  = $('Parse wfuzz').first().json;       } catch (e) { console.warn('Parse wfuzz missing'); }\ntry { schemaData = $('Parse Schemathesis').first().json; } catch (e) { console.warn('Parse Schemathesis missing'); }\ntry { catsData   = $('Parse CATS').first().json;        } catch (e) { console.warn('Parse CATS missing'); }\n\n// runId/target берём из Validate Config — Analyze не зависит от ffuf\nconst cfg = $('Validate Config').first().json;\n\n// === BASELINE ===\nlet realBaseline = {};\ntry { realBaseline = $('Save Baseline').first().json.baseline || {}; } catch (e) {}\nconst baseline = realBaseline.length || 0;\nconst baselineStatus = realBaseline.status || 200;\n\nconsole.log('Baseline:', baseline, 'status:', baselineStatus);\nconsole.log('ffuf results:', (ffufData.normalized || []).length);\nconsole.log('wfuzz results:', (wfuzzData.normalized || []).length);\n\n// === СКЛЕЙКА РЕЗУЛЬТАТОВ ===\nconst allResults = [\n  ...(ffufData.normalized  || []),\n  ...(wfuzzData.normalized || []),\n];\n\n// === ФИЛЬТР АНОМАЛИЙ ===\nfunction isAnomaly(r) {\n  if (r.status >= 500) return true;\n  if (r.status === 403 || r.status === 401) return true;\n  if (r.status === 301 || r.status === 302) return true;\n  if (r.status >= 400 && r.status < 500) return true;\n  if (r.status === 200 && baseline > 0) {\n    const diff = Math.abs(r.length - baseline);\n    if (diff > baseline * 0.3) return true;\n  }\n  if (r.time_ms > 2000) return true;\n  return false;\n}\n\nconst anomalies = [];\nconst statusBreakdown = {};\nconst endpointsSet = new Set();\nconst paramsSet = new Set();\n\nfor (const r of allResults) {\n  statusBreakdown[r.status] = (statusBreakdown[r.status] || 0) + 1;\n  endpointsSet.add(r.endpoint);\n  paramsSet.add(r.param);\n  if (isAnomaly(r)) anomalies.push(r);\n}\n\nconst grouped = {};\nfor (const a of anomalies) {\n  const key = `${a.endpoint}?${a.param}`;\n  if (!grouped[key]) grouped[key] = [];\n  grouped[key].push(a);\n}\n\n// === ИТОГ ===\nconst analysis = {\n  runId: cfg.runId,\n  target: cfg.target,\n  vulnType: cfg.vulnType,\n  wordlist: cfg.wordlist,\n  reportOut: cfg.reportOut,\n  timestamp: new Date().toISOString(),\n\n  baseline, baselineStatus,\n  baselineUrl: realBaseline.url || '',\n  baselineTimestamp: realBaseline.timestamp || '',\n\n  totalRequests: allResults.length,\n  totalAnomalies: anomalies.length,\n  anomaliesByStatus: anomalies.reduce((acc, a) => {\n    acc[a.status] = (acc[a.status] || 0) + 1;\n    return acc;\n  }, {}),\n\n  endpointsTested: endpointsSet.size,\n  paramsTested: paramsSet.size,\n  statusBreakdown,\n\n  tools: {\n    ffuf:  { total: (ffufData.normalized  || []).length, anomalies: anomalies.filter(a => a.tool === 'ffuf').length },\n    wfuzz: { total: (wfuzzData.normalized || []).length, anomalies: anomalies.filter(a => a.tool === 'wfuzz').length },\n    schemathesis: {\n      total:    (schemaData.normalized || []).length,\n      failures: schemaData.schemathesisStats?.failures || 0,\n      errors:   schemaData.schemathesisStats?.errors   || 0,\n      skipped:  schemaData.schemathesisStats?.skipped  || 0,\n    },\n    cats: {\n      total:    catsData.catsStats?.total || 0,\n      failures: catsData.catsStats?.failures || 0,\n      errors:   catsData.catsStats?.errors || 0,\n      skipped:  catsData.catsStats?.skipped || 0,\n    },\n  },\n\n  topAnomalies: anomalies.slice(0, 40),\n  groupedByEndpoint: grouped,\n  schemathesisFindings: (schemaData.normalized || []).slice(0, 30),\n  catsFindings: (catsData.normalized || []).slice(0, 30),\n};\n\n// === ЗАПИСЬ ОТЧЁТА ===\nconst fs = require('fs');\ntry {\n  fs.writeFileSync(\n    analysis.reportOut || `/results/report_${analysis.runId}.json`,\n    JSON.stringify(analysis, null, 2)\n  );\n  console.log('Report written to', analysis.reportOut);\n} catch (e) {\n  console.error('Write failed:', e.message);\n}\n\nreturn [{ json: analysis }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1584,
+        640
+      ],
+      "id": "706dbaf0-44db-4d22-a7e5-f370602872f3",
+      "name": "Analyze",
+      "executeOnce": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Form Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Config": {
+      "main": [
+        [
+          {
+            "node": "HTTP — Baseline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP — Baseline": {
+      "main": [
+        [
+          {
+            "node": "Save Baseline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Baseline": {
+      "main": [
+        [
+          {
+            "node": "Puppeteer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "LinkFinder",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Katana",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch OpenAPI",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Schemathesis",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "CATS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Puppeteer": {
+      "main": [
+        [
+          {
+            "node": "Parse Puppeteer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LinkFinder": {
+      "main": [
+        [
+          {
+            "node": "Parse LinkFinder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Katana": {
+      "main": [
+        [
+          {
+            "node": "Parse katana",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch OpenAPI": {
+      "main": [
+        [
+          {
+            "node": "Parse OpenAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Puppeteer": {
+      "main": [
+        [
+          {
+            "node": "Merge Endpoints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LinkFinder": {
+      "main": [
+        [
+          {
+            "node": "Merge Endpoints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse katana": {
+      "main": [
+        [
+          {
+            "node": "Merge Endpoints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse OpenAPI": {
+      "main": [
+        [
+          {
+            "node": "Merge Endpoints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Endpoints": {
+      "main": [
+        [
+          {
+            "node": "Expand Endpoints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Endpoints": {
+      "main": [
+        [
+          {
+            "node": "Build jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build jobs": {
+      "main": [
+        [
+          {
+            "node": "fluff",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "wfuzz",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fluff": {
+      "main": [
+        [
+          {
+            "node": "Parse ffuf",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "wfuzz": {
+      "main": [
+        [
+          {
+            "node": "Parse wfuzz",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schemathesis": {
+      "main": [
+        [
+          {
+            "node": "Parse Schemathesis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CATS": {
+      "main": [
+        [
+          {
+            "node": "Parse CATS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse CATS": {
+      "main": [
+        [
+          {
+            "node": "Analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Schemathesis": {
+      "main": [
+        [
+          {
+            "node": "Analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse wfuzz": {
+      "main": [
+        [
+          {
+            "node": "Analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse ffuf": {
+      "main": [
+        [
+          {
+            "node": "Analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "7ed35a61-aa1f-4018-be19-78599defbac3",
+  "meta": {
+    "instanceId": "e88ac7b5b3ec3554000228cf0ea286e29b0239951857e2bd413e4503030f85b4"
+  },
+  "nodeGroups": [],
+  "id": "4eMr7NM2lVgxcxMB",
+  "tags": []
+}

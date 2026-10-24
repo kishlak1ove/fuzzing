@@ -1,0 +1,392 @@
+{
+  "name": "Analyze",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -688,
+        -96
+      ],
+      "id": "bfdd3f67-1ca5-44b5-8638-019eb6d852b1",
+      "name": "When clicking ‘Execute workflow’",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\n\n// Свежий endpoints.json = база (там runId)\nconst epFiles = fs.readdirSync('/results')\n  .filter(f => f.endsWith('_endpoints.json'))\n  .map(f => ({ name: f, mtime: fs.statSync(`/results/${f}`).mtime.getTime() }))\n  .sort((a, b) => b.mtime - a.mtime);\n\nif (epFiles.length === 0) throw new Error('No endpoints.json');\n\nconst discovery = JSON.parse(fs.readFileSync(`/results/${epFiles[0].name}`, 'utf8'));\nconst runId = discovery.runId;\nconst startTime = discovery.startTime; \n\nconsole.log('Loading runId:', runId);\n\n// Читаем 3 файла\nlet dictData = { ffuf: { results: [] }, wfuzz: { results: [] } };\nlet schemaData = { schemathesis: { results: [], stats: {} }, cats: { results: [], stats: {} } };\nlet baseline = {};\n\ntry {\n  dictData = JSON.parse(fs.readFileSync(discovery.dictResultsFile, 'utf8'));\n  console.log(`Dict: ffuf=${dictData.ffuf?.results?.length || 0}, wfuzz=${dictData.wfuzz?.results?.length || 0}`);\n} catch (e) { console.error('dict read error:', e.message); }\n\ntry {\n  schemaData = JSON.parse(fs.readFileSync(discovery.schemaResultsFile, 'utf8'));\n  console.log(`Schema: schemathesis=${schemaData.schemathesis?.results?.length || 0}, cats=${schemaData.cats?.results?.length || 0}`);\n} catch (e) { console.error('schema read error:', e.message); }\n\ntry {\n  baseline = JSON.parse(fs.readFileSync(discovery.baselineFile, 'utf8'));\n  console.log(`Baseline: ${baseline.status} / ${baseline.length}`);\n} catch (e) { console.error('baseline read error:', e.message); }\n\n// === НОВОЕ: Nuclei ===\nlet nucleiData = { nuclei: { results: [], stats: { total: 0, bySeverity: {} } } };\n\ntry {\n  const nucleiFile = `/results/${runId}_nuclei_results.json`;\n  if (fs.existsSync(nucleiFile)) {\n    nucleiData = JSON.parse(fs.readFileSync(nucleiFile, 'utf8'));\n    console.log(`Nuclei: ${nucleiData.nuclei?.results?.length || 0} findings`);\n  } else {\n    console.log(`Nuclei file not found: ${nucleiFile}`);\n  }\n} catch (e) {\n  console.error('nuclei read error:', e.message);\n}\n\nreturn [{ json: {\n  ...discovery,\n  dictData,\n  schemaData,\n  baseline,\n  nucleiData, \n  startTime,// ← НОВОЕ\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        16
+      ],
+      "id": "c5eb86b5-004b-46df-9451-9385b07c24e5",
+      "name": "Read All Files",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $input.first().json;\n\nconst ffufResults  = cfg.dictData?.ffuf?.results  || [];\nconst wfuzzResults = cfg.dictData?.wfuzz?.results || [];\nconst schemaResults = cfg.schemaData?.schemathesis?.results || [];\nconst catsResults   = cfg.schemaData?.cats?.results || [];\n\nconst baseline = cfg.baseline?.length || 0;\nconst baselineStatus = cfg.baseline?.status || 200;\n\nconsole.log(`Analyze: ffuf=${ffufResults.length}, wfuzz=${wfuzzResults.length}, schema=${schemaResults.length}, cats=${catsResults.length}, baseline=${baseline}`);\n\n// === ФИЛЬТР АНОМАЛИЙ для ffuf/wfuzz ===\nfunction isDictAnomaly(r) {\n  if (r.status >= 500) return true;\n  if (r.status === 403 || r.status === 401) return true;\n  if (r.status === 301 || r.status === 302) return true;\n  if (r.status >= 400 && r.status < 500) return true;\n  if (r.status === 200 && baseline > 0) {\n    const diff = Math.abs(r.length - baseline);\n    if (diff > baseline * 0.3) return true;\n  }\n  if (r.time_ms > 2000) return true;\n  return false;\n}\n\nconst allDict = [...ffufResults, ...wfuzzResults];\nconst dictAnomalies = allDict.filter(isDictAnomaly);\n\n// Группировка\nconst grouped = {};\nfor (const a of dictAnomalies) {\n  const key = `${a.endpoint}?${a.param}`;\n  if (!grouped[key]) grouped[key] = [];\n  grouped[key].push(a);\n}\n\n// Status breakdown\nconst statusBreakdown = {};\nfor (const r of allDict) {\n  statusBreakdown[r.status] = (statusBreakdown[r.status] || 0) + 1;\n}\n\n// Anomalies by status\nconst anomaliesByStatus = {};\nfor (const a of dictAnomalies) {\n  anomaliesByStatus[a.status] = (anomaliesByStatus[a.status] || 0) + 1;\n}\n\n// Топ-40 с распределением по инструментам\nconst byTool = { ffuf: [], wfuzz: [] };\nfor (const a of dictAnomalies) {\n  if (byTool[a.tool]) byTool[a.tool].push(a);\n}\nconst perTool = 20;\nconst topAnomalies = [\n  ...byTool.ffuf.slice(0, perTool),\n  ...byTool.wfuzz.slice(0, perTool),\n].slice(0, 40);\n\n// Уникальные endpoints/params\nconst endpointsSet = new Set(allDict.map(r => r.endpoint));\nconst paramsSet = new Set(allDict.map(r => r.param));\n\n// === ИТОГ ===\nconst analysis = {\n  runId: cfg.runId,\n  target: cfg.target,\n  vulnType: cfg.vulnType,\n  owaspCategory: cfg.owaspCategory,\n  owaspName: cfg.owaspName,\n  wordlist: cfg.wordlist,\n  useArjun: cfg.dictData?.useArjun || false,\n  arjunStatus: cfg.dictData?.arjunStatus || 'unknown',\n  reportOut: cfg.reportFile,\n  timestamp: new Date().toISOString(),\n\n  baseline,\n  baselineStatus,\n  baselineUrl: cfg.baselineUrl,\n\n  totalRequests: allDict.length,\n  totalAnomalies: dictAnomalies.length,\n  anomaliesByStatus,\n\n  endpointsTested: endpointsSet.size,\n  paramsTested: paramsSet.size,\n  statusBreakdown,\n\n  tools: {\n    ffuf:  { total: ffufResults.length,  anomalies: dictAnomalies.filter(a => a.tool === 'ffuf').length },\n    wfuzz: { total: wfuzzResults.length, anomalies: dictAnomalies.filter(a => a.tool === 'wfuzz').length },\n    schemathesis: {\n      total:    schemaResults.length,\n      failures: cfg.schemaData?.schemathesis?.stats?.failures || 0,\n      errors:   cfg.schemaData?.schemathesis?.stats?.errors   || 0,\n      skipped:  cfg.schemaData?.schemathesis?.stats?.skipped  || 0,\n    },\n    cats: (() => {\n      const c = cfg.schemaData?.cats || {};\n      const results = c.results || [];\n      const stats = c.stats || {};\n      return {\n        total:    stats.total    || results.length,\n        failures: stats.failures || results.filter(r => r.isFailure).length,\n        errors:   stats.errors   || results.filter(r => r.isError).length,\n        skipped:  stats.skipped  || 0,\n      };\n    })(),\n    nuclei: {\n      total: cfg.nucleiData?.nuclei?.results?.length || 0,\n      findings: cfg.nucleiData?.nuclei?.results?.length || 0,\n      bySeverity: cfg.nucleiData?.nuclei?.stats?.bySeverity || {},\n    },\n  },\n\n  topAnomalies,\n  groupedByEndpoint: grouped,\n  schemathesisFindings: schemaResults.slice(0, 30),\n  catsFindings: catsResults.slice(0, 50),\n};\n\nconsole.log(`Analysis: totalRequests=${analysis.totalRequests}, anomalies=${analysis.totalAnomalies}, endpoints=${analysis.endpointsTested}`);\n\n// === МЕТРИКИ (для диплома) ===\nconst metrics = {\n  totalDurationSec: cfg.startTime\n    ? round((Date.now() - cfg.startTime) / 1000, 2)\n    : null,\n  requestsPerSec: null,\n  findingRate: allDict.length > 0\n    ? round(dictAnomalies.length / allDict.length, 4)\n    : 0,\n  totalFindings: dictAnomalies.length\n    + (cfg.nucleiData?.nuclei?.results?.length || 0)\n    + (schemaResults.length || 0)\n    + (catsResults.length || 0),\n  owaspCoverage: 0,\n};\n\nif (metrics.totalDurationSec && metrics.totalDurationSec > 0) {\n  metrics.requestsPerSec = round(allDict.length / metrics.totalDurationSec, 1);\n}\n\nconst owaspSet = new Set();\nif (cfg.owaspCategory) owaspSet.add(cfg.owaspCategory);\nfor (const f of (cfg.nucleiData?.nuclei?.results || [])) {\n  for (const tag of (f.owaspTags || [])) owaspSet.add(tag);\n}\nmetrics.owaspCoverage = owaspSet.size;\n\nfunction round(n, d) {\n  return Math.round(n * Math.pow(10, d)) / Math.pow(10, d);\n}\n\nconsole.log(`Metrics: duration=${metrics.totalDurationSec}s, rps=${metrics.requestsPerSec}, findings=${metrics.totalFindings}, owasp=${metrics.owaspCoverage}/10`);\n\nanalysis.metrics = metrics;\n\nreturn [{ json: analysis }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        16
+      ],
+      "id": "23559f12-e74a-4b2c-afd8-ed5c654ba23d",
+      "name": "Analyze",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const report = $input.first().json;\nconst fs = require('fs');\n\ntry {\n  fs.writeFileSync(report.reportOut, JSON.stringify(report, null, 2));\n  console.log(`Workflow 5 DONE. Report: ${report.reportOut}`);\n  console.log(`  Total requests: ${report.totalRequests}`);\n  console.log(`  Anomalies: ${report.totalAnomalies}`);\n  console.log(`  Endpoints: ${report.endpointsTested}`);\n  console.log(`  Tools: ffuf=${report.tools.ffuf.total}, wfuzz=${report.tools.wfuzz.total}, schemathesis=${report.tools.schemathesis.total}, cats=${report.tools.cats.total}`);\n} catch (e) {\n  console.error('Write failed:', e.message);\n}\n\nrequire('fs').writeFileSync('/results/status.json', JSON.stringify({ status: 'FINISHED', target: report.target }));\n\nreturn [{ json: report }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "1396d005-e9b9-4147-ba8b-67ea1449a2c3",
+      "name": "Write Report",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "collection": "runs",
+        "updateKey": "runId",
+        "fields": "runId,target,vulnType,owaspCategory,owaspName,wordlist,useArjun,arjunStatus,timestamp,baseline,baselineStatus,endpointsTested,paramsTested,totalRequests,totalAnomalies,tools,statusBreakdown,metrics",
+        "upsert": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mongoDb",
+      "typeVersion": 1.5,
+      "position": [
+        448,
+        -64
+      ],
+      "id": "b0d423bf-d3f6-43fb-af5d-7ec674ae97d8",
+      "name": "Save Run",
+      "executeOnce": true,
+      "credentials": {
+        "mongoDb": {
+          "id": "U2V6EXsWJoBvfyy8",
+          "name": "MongoDB account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5ef1d1ee-3f99-437a-a590-796bb87b95f9",
+              "name": "=_id",
+              "value": "={{ $json.runId }}",
+              "type": "string"
+            },
+            {
+              "id": "389b7863-1285-4432-a6d1-e601ad2615dd",
+              "name": "owaspCategory",
+              "value": "={{ $json.owaspCategory }}",
+              "type": "string"
+            },
+            {
+              "id": "30ac20aa-e06c-4906-ad94-510be5b8a9dd",
+              "name": "owaspName",
+              "value": "={{ $json.owaspName }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        224,
+        0
+      ],
+      "id": "5904f7ee-ab89-4ed9-9ed6-320f3d07791b",
+      "name": "Prepare Run Fields"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Берём отчёт из узла Write Report — там все findings\nconst report = $('Write Report').first().json;\n\nconst findings = [];\n\n// === 1. Аномалии от ffuf/wfuzz ===\n// groupedByEndpoint: { \"endpoint?param\": [ {tool, endpoint, param, payload, status, ...}, ... ] }\n// === 1. Аномалии от ffuf/wfuzz — по 50 от каждого ===\nconst dictAnoms = report.groupedByEndpoint\n  ? Object.values(report.groupedByEndpoint).flat()\n  : [];\n\n// Разделяем по инструментам\nconst ffufAnoms = dictAnoms.filter(f => f.tool === 'ffuf').slice(0, 50);\nconst wfuzzAnoms = dictAnoms.filter(f => f.tool === 'wfuzz').slice(0, 50);\n\nfor (const f of [...ffufAnoms, ...wfuzzAnoms]) {\n  findings.push({\n    runId: report.runId,\n    target: report.target,\n    vulnType: report.vulnType,\n    owaspCategory: report.owaspCategory,\n    tool: f.tool,\n    endpoint: f.endpoint,\n    param: f.param,\n    payload: f.payload,\n    status: f.status,\n    length: f.length,\n    time_ms: f.time_ms,\n    timestamp: new Date(),\n  });\n}\n\n// === 2. Schemathesis findings ===\nfor (const f of (report.schemathesisFindings || [])) {\n  findings.push({\n    runId: report.runId,\n    target: report.target,\n    vulnType: report.vulnType,\n    owaspCategory: report.owaspCategory,\n    tool: 'schemathesis',\n    method: f.method,\n    endpoint: f.endpoint,\n    payload: f.payload,\n    message: f.message,\n    isFailure: f.isFailure,\n    isError: f.isError,\n    timestamp: new Date(),\n  });\n}\n\n// === 3. CATS findings ===\nfor (const f of (report.catsFindings || [])) {\n  findings.push({\n    runId: report.runId,\n    target: report.target,\n    vulnType: report.vulnType,\n    tool: 'cats',\n    endpoint: f.endpoint,\n    payload: f.payload,\n    message: f.message,\n    isFailure: f.isFailure,\n    isError: f.isError,\n    timestamp: new Date(),\n  });\n}\n\n// === 4. Nuclei findings ===\nfor (const f of (report.nucleiData?.nuclei?.results || [])) {\n  findings.push({\n    runId: report.runId,\n    target: report.target,\n    vulnType: report.vulnType,\n    owaspCategory: f.owaspTags?.[0] || report.owaspCategory || '',\n    tool: 'nuclei',\n    endpoint: f.endpoint || '',\n    payload: f.payload || '',\n    severity: f.severity || 'unknown',\n    templateId: f.templateId || '',\n    templateName: f.templateName || '',\n    message: f.message || '',\n    isFailure: true,\n    timestamp: new Date(),\n  });\n}\n\nconsole.log(`Prepared ${findings.length} findings for MongoDB`);\nconsole.log(`  dict (ffuf+wfuzz): ${dictAnoms.length} (top-500)`);\nconsole.log(`  schemathesis: ${(report.schemathesisFindings || []).length}`);\nconsole.log(`  cats: ${(report.catsFindings || []).length}`);\nconsole.log(`Nuclei findings pushed: ${(report.nucleiData?.nuclei?.results || []).length}`);\n\nreturn findings.map(f => ({ json: f }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        -64
+      ],
+      "id": "de739b6e-8253-4e82-aac4-ab303f07c417",
+      "name": "Split Findings",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "collection": "findings",
+        "fields": "runId,target,vulnType,owaspCategory,tool,method,endpoint,param,payload,status,length,time_ms,message,isFailure,isError,severity,templateId,templateName,timestamp",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mongoDb",
+      "typeVersion": 1.5,
+      "position": [
+        1152,
+        -64
+      ],
+      "id": "83d62e62-f5c1-45a6-9e36-34d5a34a6f63",
+      "name": "Save Findings",
+      "credentials": {
+        "mongoDb": {
+          "id": "U2V6EXsWJoBvfyy8",
+          "name": "MongoDB account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "collection": "targets",
+        "updateKey": "url",
+        "fields": "url,name,last_seen",
+        "upsert": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mongoDb",
+      "typeVersion": 1.5,
+      "position": [
+        1600,
+        -64
+      ],
+      "id": "f55a84e0-2567-4436-95f1-17be9d7fcb43",
+      "name": "Update Target",
+      "executeOnce": true,
+      "credentials": {
+        "mongoDb": {
+          "id": "U2V6EXsWJoBvfyy8",
+          "name": "MongoDB account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1234f272-93ca-4b2b-b410-b74ed0ffe76d",
+              "name": "url",
+              "value": "={{ $('Write Report').first().json.target }}",
+              "type": "string"
+            },
+            {
+              "id": "fc93b15f-988d-4346-8638-7bcd9b6a6612",
+              "name": "name",
+              "value": "={{ $('Write Report').first().json.target }}",
+              "type": "string"
+            },
+            {
+              "id": "61400bc5-f2b2-477b-b797-95b27fdc2fbb",
+              "name": "last_seen",
+              "value": "={{ new Date().toISOString() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1376,
+        -64
+      ],
+      "id": "a09e8a07-3901-409d-9834-4f4b04f54802",
+      "name": "Prepare Target Fields",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "collection": "findings",
+        "query": "{ \"runId\": \"$1\" }",
+        "queryParameters": "={{ [ $('Write Report').first().json.runId ] }}"
+      },
+      "type": "n8n-nodes-base.mongoDb",
+      "typeVersion": 1.5,
+      "position": [
+        896,
+        -64
+      ],
+      "id": "9fa50302-cf91-49fc-aeb4-2d20903e23d6",
+      "name": "Cleanup Old Findings",
+      "executeOnce": true,
+      "credentials": {
+        "mongoDb": {
+          "id": "U2V6EXsWJoBvfyy8",
+          "name": "MongoDB account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -752,
+        160
+      ],
+      "id": "3521fd1c-2472-4a78-80ea-2f171a7c8ee7",
+      "name": "When Executed by Another Workflow"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Read All Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read All Files": {
+      "main": [
+        [
+          {
+            "node": "Analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze": {
+      "main": [
+        [
+          {
+            "node": "Write Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Report": {
+      "main": [
+        [
+          {
+            "node": "Prepare Run Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Run Fields": {
+      "main": [
+        [
+          {
+            "node": "Save Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Run": {
+      "main": [
+        [
+          {
+            "node": "Split Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Findings": {
+      "main": [
+        [
+          {
+            "node": "Cleanup Old Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Findings": {
+      "main": [
+        [
+          {
+            "node": "Prepare Target Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Target Fields": {
+      "main": [
+        [
+          {
+            "node": "Update Target",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cleanup Old Findings": {
+      "main": [
+        [
+          {
+            "node": "Save Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Read All Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "419b6d1e-b101-4a92-a8ad-7c92a6c851df",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e8ba1e36580f610ee135711730f78334e2d8d2defdeb3a07a80ab9e59e294d90"
+  },
+  "nodeGroups": [],
+  "id": "CyntrrFOfbG0fsfW",
+  "tags": []
+}

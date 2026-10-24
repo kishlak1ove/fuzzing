@@ -1,0 +1,15 @@
+1. UNION ALL ' 
+2. UNION '$
+3. UNION '\n
+4. UNION '|
+5. UNION '**
+6. UNION '***
+7. UNION '****
+8. UNION '*****
+9. UNION '******
+10. UNION '*******
+11. UNION '********
+12. UNION '*********
+13. UNION '**********
+14. UNION '****************
+15. UNION '***UNION***

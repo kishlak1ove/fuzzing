@@ -1,0 +1,647 @@
+{
+  "name": "Discovery",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Запуск фаззинга",
+        "formDescription": "Выберите цель и тип уязвимости",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Target URL",
+              "fieldName": "Target URL",
+              "defaultValue": "http://vulnapi:5035",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Vulnerability Type",
+              "fieldType": "dropdown",
+              "fieldName": "Vulnerability Type",
+              "defaultValue": "A03_Injection_SQLi",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "A01_Broken_Access_Control"
+                  },
+                  {
+                    "option": "A03_Injection_SQLi"
+                  },
+                  {
+                    "option": "A03_Injection_XSS"
+                  },
+                  {
+                    "option": "A03_Injection_SSTI"
+                  },
+                  {
+                    "option": "A03_Injection_CMD"
+                  },
+                  {
+                    "option": "A03_Injection_LFI"
+                  },
+                  {
+                    "option": "A05_Security_Misconfiguration"
+                  },
+                  {
+                    "option": "A07_Auth_Failures"
+                  },
+                  {
+                    "option": "A10_SSRF"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Depth",
+              "fieldType": "number",
+              "fieldName": "Depth",
+              "placeholder": "1",
+              "defaultValue": "1"
+            },
+            {
+              "fieldLabel": "Auth Token",
+              "fieldName": "Auth Token",
+              "placeholder": "Bearer xxx (опционально)"
+            },
+            {
+              "fieldLabel": "Use Arjun",
+              "fieldType": "checkbox",
+              "defaultValue": "false",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "useArjun"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -848,
+        192
+      ],
+      "id": "14151bcd-52ec-4e07-b223-cf99e24f5581",
+      "name": "Form Trigger",
+      "webhookId": "276c46f2-3cf0-4002-8f5f-84283a551f15"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst data = input.body || input;\n\nconst target     = data['Target URL'] || data.target;\nconst vulnType   = data['Vulnerability Type'] || 'A03_Injection_SQLi';\nconst depth      = parseInt(data.Depth) || 2;\nconst authToken  = data['Auth Token'] || '';\nconst useArjun   = data.useArjun === true || data.useArjun === 'true'; // Читаем чекбокс\n\nif (!target || !target.startsWith('http')) {\n  throw new Error('Invalid target: ' + target);\n}\n\n// === Маппинг OWASP-категория → wordlist ===\nconst WORDLISTS = {\n  A01_Broken_Access_Control:    '/seeds/payloads.txt',\n  A03_Injection_SQLi:           '/seeds/SecLists/Fuzzing/Databases/SQLi/Generic-SQLi.txt',\n  A03_Injection_XSS:            '/seeds/SecLists/Fuzzing/XSS/robot-friendly/XSS-Jhaddix.txt',\n  A03_Injection_SSTI:           '/seeds/SecLists/Fuzzing/template-engines-special-vars.txt',\n  A03_Injection_CMD:            '/seeds/SecLists/Fuzzing/command-injection-commix.txt',\n  A03_Injection_LFI:            '/seeds/SecLists/Fuzzing/LFI/LFI-Jhaddix.txt',\n  A05_Security_Misconfiguration: '/seeds/payloads.txt',\n  A07_Auth_Failures:            '/seeds/SecLists/Fuzzing/Databases/SQLi/Generic-SQLi.txt',\n  A10_SSRF:                     '/seeds/payloads.txt',\n};\n\n// === Человеческие названия OWASP ===\nconst OWASP_NAMES = {\n  A01: 'Broken Access Control',\n  A02: 'Cryptographic Failures',\n  A03: 'Injection',\n  A04: 'Insecure Design',\n  A05: 'Security Misconfiguration',\n  A06: 'Vulnerable and Outdated Components',\n  A07: 'Identification and Authentication Failures',\n  A08: 'Software and Data Integrity Failures',\n  A09: 'Security Logging and Monitoring Failures',\n  A10: 'Server-Side Request Forgery (SSRF)',\n};\n\nconst wordlist = WORDLISTS[vulnType];\nif (!wordlist) throw new Error('Unknown vuln_type: ' + vulnType);\n\n// Извлекаем код OWASP (A01, A03, ...)\nconst owaspCategory = vulnType.split('_')[0];       // A03\nconst owaspName = OWASP_NAMES[owaspCategory] || 'Unknown';\n\nconst ts   = new Date().toISOString().replace(/[:.]/g, '-');\nconst slug = target.replace(/https?:\\/\\//, '').replace(/[^a-z0-9]/gi, '_');\nconst runId = `n8n_${vulnType}_${slug}_${ts}`;\n\nconst baseUrl    = (target.match(/^(https?:\\/\\/[^\\/]+)/) || [])[1] || target;\nconst openApiUrl = `${baseUrl}/openapi.json`;\n\nconst config = {\n  runId,\n  target, vulnType, depth, authToken, wordlist, useArjun,\n  ts, slug,\n  baseUrl, openApiUrl,\n  owaspCategory,   // ← НОВОЕ\n  owaspName,       // ← НОВОЕ\n  baselineUrl: `${target}${target.includes('?') ? '&' : '?'}id=1`,\n  configFile:      `/results/${runId}_config.json`,\n  baselineFile:    `/results/${runId}_baseline.json`,\n  endpointsFile:   `/results/${runId}_endpoints.json`,\n  arjunFile:       `/results/${runId}_arjun.json`,\n  dictResultsFile: `/results/${runId}_dict_results.json`,\n  schemaResultsFile: `/results/${runId}_schema_results.json`,\n  reportFile:      `/results/report_${runId}.json`,\n\n  katanaOut:       `/results/${runId}_katana.txt`,\n  linkfinderOut:   `/results/${runId}_linkfinder.json`,\n  puppeteerOut:    `/results/${runId}_puppeteer.json`,\n  schemathesisOut: `/results/${runId}_schemathesis.xml`,\n\n  startTime: Date.now(),\n};\n\nconst fs = require('fs');\ntry {\n  fs.writeFileSync(config.configFile, JSON.stringify(config, null, 2));\n  console.log('Config saved:', config.configFile);\n  console.log('RunId:', runId);\n  console.log('OWASP:', owaspCategory, '-', owaspName);\n} catch (e) {\n  console.error('Config write failed:', e.message);\n}\n\nrequire('fs').writeFileSync('/results/status.json', JSON.stringify({ status: 'RUNNING', target: target }));\n\nreturn [{ json: config }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -624,
+        192
+      ],
+      "id": "c167b48c-e0db-4f7b-a3bd-a44e3b94a3de",
+      "name": "Validate Config",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.baselineUrl }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -400,
+        192
+      ],
+      "id": "b59b0b6c-f1c4-449a-bece-5bf7ae83e880",
+      "name": "HTTP — Baseline",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst resp = $input.first().json;\nconst fs = require('fs');\n\nconst rawBody = resp.body ?? resp.data ?? '';\nlet bodyStr = '';\nif (typeof rawBody === 'string') {\n  bodyStr = rawBody;\n} else if (rawBody && typeof rawBody === 'object') {\n  bodyStr = JSON.stringify(rawBody);\n}\n\nconst status = resp.statusCode || resp.status || 0;\n\n// Длина в БАЙТАХ, как у ffuf/wfuzz — берём из content-length, fallback на длину строки\nconst clHeader = resp.headers?.['content-length'];\nconst length = clHeader ? parseInt(clHeader) : Buffer.byteLength(bodyStr, 'utf8');\n\nconst baseline = {\n  url: cfg.baselineUrl,\n  status: status,\n  length: length,\n  timestamp: new Date().toISOString(),\n};\n\ntry {\n  fs.writeFileSync(cfg.baselineFile, JSON.stringify(baseline, null, 2));\n  console.log('Baseline saved:', baseline);\n} catch (e) {\n  console.error('baseline write failed:', e.message);\n}\n\nreturn [{\n  json: {\n    ...cfg,\n    baseline,\n    baselineLength: length,\n    baselineStatus: status,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -176,
+        192
+      ],
+      "id": "21d1c080-d69d-4742-882c-7c5a56d52542",
+      "name": "Save Baseline",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=timeout 60 docker exec puppeteer node /app/extract.js \"{{ $json.target }}\" \"{{ $json.puppeteerOut }}\" > /dev/null 2>&1; echo \"EXIT=$?\"; cat \"{{ $json.puppeteerOut }}\" 2>/dev/null | head -c 2000 || echo '{\"xhr\":[],\"forms\":[]}'"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        48,
+        192
+      ],
+      "id": "528682e4-b11e-4bff-a1a1-35fa82cc6c05",
+      "name": "Puppeteer"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst fs = require('fs');\n\nawait new Promise(r => setTimeout(r, 1500));\n\nlet xhrEndpoints = [];\nlet formParams = [];\n\nif (fs.existsSync(cfg.puppeteerOut)) {\n  try {\n    const data = JSON.parse(fs.readFileSync(cfg.puppeteerOut, 'utf8'));\n\n    xhrEndpoints = (data.xhr || [])\n      .map(r => r.url.split('?')[0])\n      .filter(u => u.startsWith('http'))\n      .filter((v, i, a) => a.indexOf(v) === i);\n\n    formParams = (data.forms || [])\n      .map(f => f.name)\n      .filter(n => n && !n.includes('['))\n      .filter((v, i, a) => a.indexOf(v) === i);\n  } catch (e) {\n    console.error('Puppeteer parse error:', e.message);\n  }\n}\n\nconsole.log(`Puppeteer: ${xhrEndpoints.length} XHR, ${formParams.length} forms`);\n\nreturn [{ json: {\n  ...cfg,\n  puppeteerXhr: xhrEndpoints,\n  puppeteerForms: formParams,\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        192
+      ],
+      "id": "d8dd8966-2af6-490e-8f64-77b018fff93b",
+      "name": "Parse Puppeteer",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=timeout 60 docker exec linkfinder python /app/linkfinder.py -i \"{{ $json.target }}\" -d -o cli > /tmp/lf_out.txt 2>&1; echo \"EXIT=$?\"; cp /tmp/lf_out.txt \"{{ $json.linkfinderOut }}\" 2>/dev/null; echo \"DONE\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "89ae3a68-9470-4b28-8d8d-274673a087b7",
+      "name": "LinkFinder"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst fs = require('fs');\n\nlet raw = '';\ntry {\n  raw = fs.readFileSync(cfg.linkfinderOut, 'utf8');\n} catch (e) {\n  console.error('LinkFinder read error:', e.message);\n}\n\nconst paths = raw\n  .split('\\n')\n  .map(l => l.trim())\n  .filter(l => l && !l.startsWith('Running against'))\n  .filter(l => (l.startsWith('/') && !l.startsWith('//')) || l.startsWith('http'))\n  .filter(l => {\n    if (/^https?:\\/\\/(www\\.)?(owasp|youtube|fonts|google|w3|testnets|ipinfo|api\\.ipinfo)/i.test(l)) return false;\n    if (/\\.(js|css|png|jpg|jpeg|svg|woff2?|ttf|ico|map)$/i.test(l)) return false;\n    return true;\n  })\n  .filter((v, i, a) => a.indexOf(v) === i);\n\nconsole.log(`LinkFinder: ${paths.length} paths`);\n\nreturn [{ json: { ...cfg, linkfinderPaths: paths }}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "20784cff-93d0-4f42-90ea-8a0d8ba40eae",
+      "name": "Parse LinkFinder",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=timeout 120 docker exec katana katana -u {{ $json.target }} -jc -d {{ $json.depth }} -silent -o {{ $json.katanaOut }} > /dev/null 2>&1; echo \"EXIT=$?\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        160,
+        448
+      ],
+      "id": "f5bcc5a8-2898-4ed8-9b79-5f9874b18287",
+      "name": "Katana"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst fs = require('fs');\n\nawait new Promise(r => setTimeout(r, 1500));\n\nlet content = '';\ntry { content = fs.readFileSync(cfg.katanaOut, 'utf8'); }\ncatch (e) { content = cfg.target + '\\n'; }\n\nconst endpoints = content\n  .split('\\n')\n  .map(l => l.trim())\n  .filter(l => l && l.includes('http'))\n  .filter(l => !/\\.(png|jpg|jpeg|gif|css|js|mjs|jsx|ts|tsx|woff2?|ico|svg|map|ttf|eot|webp|avif|mp4|webm)$/i.test(l))\n  .filter(l => {\n    if (l === cfg.target) return true;\n    if (l.includes('?')) return true;\n    if (/\\/(rest|api|admin|user|search|login|products?|sqli|xss|ssti|rce|ptrav|xxe|redirect|ping|contact|transfer)/i.test(l)) return true;\n    return false;\n  })\n  .filter((v, i, a) => a.indexOf(v) === i);\n\nif (!endpoints.includes(cfg.target)) endpoints.unshift(cfg.target);\n\nconsole.log(`Katana: ${endpoints.length} endpoints`);\n\nreturn [{ json: { ...cfg, katanaEndpoints: endpoints }}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        352,
+        448
+      ],
+      "id": "5d159b59-507c-4142-824b-cf63e107dc62",
+      "name": "Parse katana",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.openApiUrl }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        256,
+        704
+      ],
+      "id": "a1432480-0840-46d1-b281-0815eafd135c",
+      "name": "Fetch OpenAPI",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Validate Config').first().json;\nconst resp = $input.first().json;\n\nconst paths = [];\n\ntry {\n  const body = resp.body ?? resp.data;\n  const spec = typeof body === 'string' ? JSON.parse(body) : body;\n\n  if (spec && spec.paths) {\n    for (const path of Object.keys(spec.paths)) {\n      const cleanPath = path.replace(/\\{[^}]+\\}/g, 'FUZZ');\n      paths.push(`${cfg.baseUrl}${cleanPath}`);\n    }\n  }\n  console.log(`OpenAPI: ${paths.length} endpoints`);\n} catch (e) {\n  console.log('OpenAPI parse skipped:', e.message);\n}\n\nreturn [{ json: { ...cfg, openApiEndpoints: paths }}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        704
+      ],
+      "id": "a577f6fe-ee83-46a2-a06a-25eb7bb16ddd",
+      "name": "Parse OpenAPI",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const { URL } = require('url');\n\nconst cfg = $('Validate Config').first().json;\n\n// === ЯВНО берём данные из каждого парсера по имени ===\nconst katanaEndpoints  = ($('Parse katana').first().json.katanaEndpoints)     || [];\nconst linkfinderPaths  = ($('Parse LinkFinder').first().json.linkfinderPaths) || [];\nconst openApiEndpoints = ($('Parse OpenAPI').first().json.openApiEndpoints)   || [];\nconst puppeteerXhr     = ($('Parse Puppeteer').first().json.puppeteerXhr)     || [];\nconst puppeteerForms   = ($('Parse Puppeteer').first().json.puppeteerForms)   || [];\n\nconsole.log(`=== MERGE DEBUG ===`);\nconsole.log(`katana: ${katanaEndpoints.length}`);\nconsole.log(`linkfinder: ${linkfinderPaths.length}`);\nconsole.log(`openapi: ${openApiEndpoints.length}`);\nconsole.log(`puppeteer xhr: ${puppeteerXhr.length}`);\nconsole.log(`puppeteer forms: ${puppeteerForms.length}`);\n\nlet allEndpoints = [\n  ...katanaEndpoints,\n  ...linkfinderPaths\n    .filter(p => p.startsWith('/') && !p.startsWith('//'))\n    .map(p => `${cfg.baseUrl}${p}`),\n  ...openApiEndpoints,\n  ...puppeteerXhr,\n];\n\nconst beforeFilter = allEndpoints.length;\nconst targetHost = new URL(cfg.baseUrl).host.toLowerCase();\n\nallEndpoints = allEndpoints.filter(ep => {\n  try {\n    const u = new URL(ep);\n    if (u.host.toLowerCase() !== targetHost) return false;\n    if (u.pathname.startsWith('//')) return false;\n    if (/\\.(js|css|png|jpg|jpeg|svg|woff2?|ttf|ico|map|webp|avif|mp4|webm|json|xml)$/i.test(u.pathname)) return false;\n    return true;\n  } catch (e) { return false; }\n}).filter((v, i, a) => a.indexOf(v) === i);\n\nif (allEndpoints.length === 0) allEndpoints.push(cfg.target);\n\nconsole.log(`After filter: ${allEndpoints.length} endpoints (was ${beforeFilter})`);\n\nreturn [{ json: {\n  ...cfg,\n  endpoints: allEndpoints,\n  puppeteerForms,\n  endpointCount: allEndpoints.length,\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        272
+      ],
+      "id": "e9ac46d9-989b-4593-bd9a-f2c9c3e5399a",
+      "name": "Merge Endpoints",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $input.first().json;\nconst fs = require('fs');\n\nconst discovery = {\n  runId: cfg.runId,\n  target: cfg.target,\n  vulnType: cfg.vulnType,\n  depth: cfg.depth,\n  authToken: cfg.authToken,\n  wordlist: cfg.wordlist,\n  baseUrl: cfg.baseUrl,\n  openApiUrl: cfg.openApiUrl,\n  baselineUrl: cfg.baselineUrl,\n  ts: cfg.ts,\n  slug: cfg.slug,\n\n  endpoints: cfg.endpoints,\n  endpointCount: cfg.endpointCount,\n  puppeteerForms: cfg.puppeteerForms || [],\n\n  // пути ко всем файлам\n  configFile:      cfg.configFile,\n  baselineFile:    cfg.baselineFile,\n  endpointsFile:   cfg.endpointsFile,\n  arjunFile:       cfg.arjunFile,\n  dictResultsFile: cfg.dictResultsFile,\n  schemaResultsFile: cfg.schemaResultsFile,\n  reportFile:      cfg.reportFile,\n  katanaOut:       cfg.katanaOut,\n  linkfinderOut:   cfg.linkfinderOut,\n  puppeteerOut:    cfg.puppeteerOut,\n  schemathesisOut: cfg.schemathesisOut,\n\n  owaspCategory: cfg.owaspCategory,\n  owaspName: cfg.owaspName,\n  startTime: cfg.startTime,\n};\n\nfs.writeFileSync(cfg.endpointsFile, JSON.stringify(discovery, null, 2));\nconsole.log(`Workflow 1 DONE. Endpoints: ${discovery.endpointCount}, file: ${cfg.endpointsFile}`);\n\nreturn [{ json: discovery }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        464
+      ],
+      "id": "2bad0503-2683-4a8b-95e4-2097aa89c7d1",
+      "name": "Write Endpoints",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "Oqw8H5noDGV1tGkW",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/Oqw8H5noDGV1tGkW",
+          "cachedResultName": "Parameter Discovery"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2304,
+        688
+      ],
+      "id": "2ee1b51c-b5dc-4db5-824b-dbc7e917ae3a",
+      "name": "Call 'Parameter Discovery'"
+    },
+    {
+      "parameters": {
+        "jsCode": "const { URL } = require('url');\nconst fs = require('fs');\nconst cfg = $input.first().json;\n\n// Эндпоинты уже отфильтрованы в Merge Endpoints,\n// но на всякий случай фильтруем ещё раз — дешево.\nconst targetHost = new URL(cfg.target).host.toLowerCase();\n\nconst endpoints = (cfg.endpoints || []).filter(ep => {\n  try {\n    const u = new URL(ep);\n    if (u.host.toLowerCase() !== targetHost) return false;\n    if (/\\.(js|css|png|jpg|jpeg|svg|woff2?|ttf|ico|map|webp|avif|mp4|webm|json|xml)$/i.test(u.pathname)) return false;\n    return true;\n  } catch (e) { return false; }\n}).filter((v, i, a) => a.indexOf(v) === i);\n\nif (endpoints.length === 0) endpoints.push(cfg.target);\n\nconst inputFile = `/results/${cfg.runId}_nuclei_input.txt`;\nfs.writeFileSync(inputFile, endpoints.join('\\n'));\n\nconst nucleiOut = `/results/${cfg.runId}_nuclei.jsonl`;\n\nconsole.log(`Nuclei input: ${endpoints.length} endpoints → ${inputFile}`);\nconsole.log(endpoints.join('\\n'));\n\nreturn [{ json: {\n  ...cfg,\n  nucleiInputFile: inputFile,\n  nucleiOut,\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1296,
+        752
+      ],
+      "id": "6c3b44b6-5a27-4390-8c86-114231653e53",
+      "name": "Prepare Nuclei Input",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=timeout 400 docker exec nuclei nuclei -l {{ $('Prepare Nuclei Input').first().json.nucleiInputFile }} -severity medium,high,critical -jsonl -o {{ $('Prepare Nuclei Input').first().json.nucleiOut }} -no-color -etags intrusive,dos,fuzz -timeout 5 -retries 0 -rate-limit 100 -c 25 -silent > /tmp/nuclei_scan.log 2>&1; echo \"EXIT=$?\"; tail -3 /tmp/nuclei_scan.log"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1632,
+        288
+      ],
+      "id": "ccd014c2-1cd2-4754-b6f9-06a7a9f422ce",
+      "name": "Nuclei"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst cfg = $('Prepare Nuclei Input').first().json;\n\nconst findings = [];\n\nif (fs.existsSync(cfg.nucleiOut)) {\n  const raw = fs.readFileSync(cfg.nucleiOut, 'utf8').trim();\n  const lines = raw ? raw.split('\\n') : [];\n\n  for (const line of lines) {\n    if (!line.trim()) continue;\n    try {\n      const r = JSON.parse(line);\n\n      const tags = r.info?.tags || [];\n      const owaspTags = tags\n        .filter(t => /^a\\d{2}/i.test(t))\n        .map(t => t.toUpperCase().slice(0, 3));\n\n      findings.push({\n        tool: 'nuclei',\n        endpoint: r.host || '',\n        matchedAt: r['matched-at'] || '',\n        payload: r['matched-at'] || '',\n        severity: (r.info?.severity || 'unknown').toLowerCase(),\n        templateId: r['template-id'] || '',\n        templateName: r.info?.name || '',\n        owaspTags,\n        message: r.info?.description || '',\n        status: 0,\n        length: 0,\n        time_ms: 0,\n        isFailure: true,\n      });\n    } catch (e) {\n      console.error('Nuclei parse error:', e.message, line.slice(0, 100));\n    }\n  }\n}\n\nconsole.log(`Nuclei: ${findings.length} findings`);\n\nreturn [{ json: {\n  ...cfg,\n  nucleiResults: findings,\n  nucleiStats: {\n    total: findings.length,\n    bySeverity: findings.reduce((acc, f) => {\n      acc[f.severity] = (acc[f.severity] || 0) + 1;\n      return acc;\n    }, {}),\n  },\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1856,
+        320
+      ],
+      "id": "6514708e-6b58-4d09-9c8a-f4b935a038a3",
+      "name": "Parse Nuclei",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst data = $input.first().json;\n\nconst out = {\n  runId: data.runId,\n  target: data.target,\n  vulnType: data.vulnType,\n  owaspCategory: data.owaspCategory,\n  owaspName: data.owaspName,\n  nuclei: {\n    results: data.nucleiResults || [],\n    stats: data.nucleiStats || { total: 0, bySeverity: {} },\n  },\n  timestamp: new Date().toISOString(),\n};\n\nconst file = `/results/${data.runId}_nuclei_results.json`;\nfs.writeFileSync(file, JSON.stringify(out, null, 2));\n\nconsole.log(`Nuclei DONE: ${out.nuclei.results.length} findings → ${file}`);\n\nreturn [{ json: { ...out, nucleiResultsFile: file } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2016,
+        496
+      ],
+      "id": "5da27823-34ff-4507-9d55-fda88a8ea7b5",
+      "name": "Write Nuclei Results",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "command": "=timeout 300 docker exec nuclei nuclei -update-templates -silent > /tmp/nuclei_update.log 2>&1; echo \"EXIT=$?\"; tail -2 /tmp/nuclei_update.log"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1456,
+        480
+      ],
+      "id": "d572a039-f276-4822-b299-aab2ee4e6010",
+      "name": "Nuclei Update Templates"
+    },
+    {
+      "parameters": {
+        "numberInputs": 4
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        640,
+        240
+      ],
+      "id": "dd9e6bd0-5460-4614-8739-53f328c9951b",
+      "name": "Merge"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Form Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Config": {
+      "main": [
+        [
+          {
+            "node": "HTTP — Baseline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP — Baseline": {
+      "main": [
+        [
+          {
+            "node": "Save Baseline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Baseline": {
+      "main": [
+        [
+          {
+            "node": "Puppeteer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "LinkFinder",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Katana",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch OpenAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Puppeteer": {
+      "main": [
+        [
+          {
+            "node": "Parse Puppeteer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LinkFinder": {
+      "main": [
+        [
+          {
+            "node": "Parse LinkFinder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Katana": {
+      "main": [
+        [
+          {
+            "node": "Parse katana",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch OpenAPI": {
+      "main": [
+        [
+          {
+            "node": "Parse OpenAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LinkFinder": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Puppeteer": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Parse katana": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Parse OpenAPI": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Merge Endpoints": {
+      "main": [
+        [
+          {
+            "node": "Write Endpoints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Endpoints": {
+      "main": [
+        [
+          {
+            "node": "Prepare Nuclei Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Nuclei Input": {
+      "main": [
+        [
+          {
+            "node": "Nuclei Update Templates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nuclei": {
+      "main": [
+        [
+          {
+            "node": "Parse Nuclei",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Nuclei": {
+      "main": [
+        [
+          {
+            "node": "Write Nuclei Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Nuclei Results": {
+      "main": [
+        [
+          {
+            "node": "Call 'Parameter Discovery'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nuclei Update Templates": {
+      "main": [
+        [
+          {
+            "node": "Nuclei",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Merge Endpoints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "850c1ba9-669e-47de-98e1-54ce77778243",
+  "meta": {
+    "instanceId": "e8ba1e36580f610ee135711730f78334e2d8d2defdeb3a07a80ab9e59e294d90"
+  },
+  "nodeGroups": [],
+  "id": "9FazMpRyqcOQxO6M",
+  "tags": []
+}

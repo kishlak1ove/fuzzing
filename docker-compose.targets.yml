@@ -1,0 +1,45 @@
+services:
+    juice-shop:
+      image: bkimminich/juice-shop:latest
+      container_name: juice-shop
+      ports:
+        - "127.0.0.1:3000:3000"
+      networks:
+        - fuzzing-net
+      restart: unless-stopped
+    
+    pygoat:
+      image: pygoat/pygoat:latest
+      container_name: pygoat
+      ports:
+      - "127.0.0.1:8000:8000"
+      restart: unless-stopped
+      networks:
+      - fuzzing-net
+    
+    vulnapi:
+      build: 
+        context: ./targets/VulnAPI
+      container_name: vulnapi
+      ports:
+        - "127.0.0.1:5035:5035" # FastAPI endpoints
+        - "127.0.0.1:8082:8082" # GraphQL
+        - "127.0.0.1:8080:8080" # JSON:API
+      restart: unless-stopped
+      networks: 
+        - fuzzing-net
+    
+    javaspringvulny:
+      build:
+        context: ./targets/javaspringvulny
+      container_name: javaspringvulny
+      ports:
+        - "127.0.0.1:9000:9000"
+      restart: unless-stopped
+      networks:
+        - fuzzing-net
+
+networks:
+  fuzzing-net:
+    external: true
+    name: web-fuzz_secnet

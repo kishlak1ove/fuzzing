@@ -1,0 +1,7 @@
+Target URL: http://juice-shop:3000/rest/products/search?q=FUZZ
+Vulnerability Type: sqli
+Depth: 1
+
+Target URL: http://vulnapi:5035/sqli/search
+Vulnerability Type: sqli
+Depth: 1

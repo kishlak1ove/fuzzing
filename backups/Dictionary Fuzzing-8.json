@@ -1,0 +1,442 @@
+{
+  "name": "Dictionary Fuzzing",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1136,
+        48
+      ],
+      "id": "c69c0e01-01a9-4ea6-87d2-5127e444fdc5",
+      "name": "When clicking ‘Execute workflow’",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\n\n// Флаг из Set\nconst useArjun = $input.first().json.useArjun === true;\nconsole.log(`useArjun: ${useArjun}`);\n\n// Самый свежий endpoints.json\nconst epFiles = fs.readdirSync('/results')\n  .filter(f => f.endsWith('_endpoints.json'))\n  .map(f => ({ name: f, mtime: fs.statSync(`/results/${f}`).mtime.getTime() }))\n  .sort((a, b) => b.mtime - a.mtime);\n\nif (epFiles.length === 0) throw new Error('No endpoints.json found');\n\nconst discovery = JSON.parse(fs.readFileSync(`/results/${epFiles[0].name}`, 'utf8'));\nconsole.log(`Loaded: ${discovery.runId} (${discovery.endpointCount} endpoints)`);\n\n// Arjun только если useArjun=true\nlet arjunParams = {};\nlet arjunStatus = 'disabled';\n\nif (useArjun && discovery.arjunFile && fs.existsSync(discovery.arjunFile)) {\n  try {\n    const arjun = JSON.parse(fs.readFileSync(discovery.arjunFile, 'utf8'));\n    if (arjun.arjunSkipped) {\n      arjunStatus = 'skipped';\n    } else {\n      arjunParams = arjun.arjunParams || {};\n      arjunStatus = 'loaded';\n      const n = Object.keys(arjunParams).length;\n      const total = Object.values(arjunParams).flat().length;\n      console.log(`Arjun loaded: ${n} endpoints, ${total} params`);\n    }\n  } catch (e) {\n    arjunStatus = 'parse-error';\n    console.warn('Arjun read error:', e.message);\n  }\n} else if (useArjun) {\n  arjunStatus = 'file-missing';\n  console.log('Arjun file missing — using DEFAULT_PARAMS');\n} else {\n  console.log('useArjun=false — using DEFAULT_PARAMS');\n}\n\nreturn [{ json: {\n  ...discovery,\n  useArjun,\n  arjunStatus,\n  arjunParams,\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -864,
+        320
+      ],
+      "id": "4c3ed43e-4fef-4076-9d86-80f5faaff174",
+      "name": "Read Files",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $input.first().json;\n\nconst endpoints = (cfg.endpoints || [])\n  .filter(ep => !/\\.(js|css|png|jpg|jpeg|svg|woff2?|ttf|ico|map)$/i.test(ep))\n  .filter((v, i, a) => a.indexOf(v) === i);\n\nif (endpoints.length === 0) endpoints.push(cfg.target);\n\nconst DEFAULT_PARAMS = ['id', 'q', 'search', 'query', 'file', 'url', 'name'];\nconst arjunParams = cfg.arjunParams || {};\n\nconst allParams = {};\nlet arjunCovered = 0;\n\nfor (const ep of endpoints) {\n  const discovered = arjunParams[ep] || [];\n  if (discovered.length > 0) {\n    allParams[ep] = discovered;\n    arjunCovered++;\n    console.log(`Arjun params for ${ep}: ${discovered.join(', ')}`);\n  } else {\n    allParams[ep] = DEFAULT_PARAMS;\n  }\n}\n\nconsole.log(`Expand: ${endpoints.length} endpoints, arjun-covered: ${arjunCovered}`);\n\nreturn [{ json: {\n  ...cfg,\n  allParams,\n  endpointCount: endpoints.length,\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        256
+      ],
+      "id": "8cdb0a7b-9029-45db-a934-75e907bbb411",
+      "name": "Expand Endpoints",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst cfg = $input.first().json;\nconst allParams = cfg.allParams || {};\nconst paramTypes = cfg.openApiParamTypes || {};\nconst puppeteerParams = cfg.puppeteerForms || [];\n\nfor (const [endpoint, params] of Object.entries(allParams)) {\n  allParams[endpoint] = [...new Set([...params, ...puppeteerParams])];\n}\n\nconst OWASP_ENDPOINT_FILTER = {\n  A01_Broken_Access_Control:     /(api\\/users|login|admin|user)/i,\n  A03_Injection_SQLi:            /(sqli|login|user|search|api)/i,\n  A03_Injection_XSS:             /(xss|search|reflected|stored|dom|contact)/i,\n  A03_Injection_SSTI:            /(ssti|template|page)/i,\n  A03_Injection_CMD:             /(rce|ping|eval)/i,\n  A03_Injection_LFI:             /(ptrav|read|download|file|page)/i,\n  A05_Security_Misconfiguration: /./,\n  A07_Auth_Failures:             /(login|auth|token|session)/i,\n  A10_SSRF:                      /(redirect|redir|url|fetch|proxy|webhook)/i,\n};\n\nconst filter = OWASP_ENDPOINT_FILTER[cfg.vulnType] || /./;\nconst DEFAULT_PARAMS = ['id', 'q', 'search', 'query', 'file', 'url', 'name'];\n\n// Загружаем базовый словарь (SecLists) в память\nlet basePayloads = [];\ntry {\n  basePayloads = fs.readFileSync(cfg.wordlist, 'utf8').split('\\n').filter(l => l.trim());\n} catch (e) {\n  console.error('Wordlist read error:', e.message);\n  basePayloads = ['FUZZ']; // fallback\n}\n\nconst jobs = [];\nlet i = 0;\nconst MAX_JOBS = 30;\n\nfor (const [endpoint, params] of Object.entries(allParams)) {\n  if (!filter.test(endpoint)) continue;\n\n  const paramsToUse = (params && params.length > 0) ? params : DEFAULT_PARAMS;\n  const epTypes = paramTypes[endpoint] || {};\n\n  for (const param of paramsToUse) {\n    if (i >= MAX_JOBS) break;\n    \n    let currentWordlist = cfg.wordlist;\n    const pType = epTypes[param]?.type;\n    const pFormat = epTypes[param]?.format;\n\n    // === УМНАЯ МУТАЦИЯ (Smart Fuzzing) ===\n    if (pFormat === 'uuid' || pFormat === 'email' || pType === 'integer') {\n      const customWordlistPath = `/results/${cfg.runId}_custom_${i}.txt`;\n      const mutatedPayloads = basePayloads.map(payload => {\n        if (pFormat === 'email') return `admin\"${payload}\"@test.com`;\n        if (pFormat === 'uuid') return `123e4567-e89b-12d3-a456-${payload.substring(0,12).padEnd(12, '0')}`;\n        if (pType === 'integer') return `${Math.floor(Math.random() * 100)}${payload}`;\n        return payload;\n      });\n      fs.writeFileSync(customWordlistPath, mutatedPayloads.join('\\n'));\n      currentWordlist = customWordlistPath;\n    }\n\n    jobs.push({\n      endpoint, param,\n      target: cfg.target,\n      wordlist: currentWordlist, // Используем базовый или мутированный\n      vulnType: cfg.vulnType,\n      owaspCategory: cfg.owaspCategory,\n      owaspName: cfg.owaspName,\n      runId: cfg.runId,\n      ffufOut:  `/results/${cfg.runId}_ffuf_${i}.json`,\n      wfuzzOut: `/results/${cfg.runId}_wfuzz_${i}.txt`,\n      // Пробрасываем пути для следующих узлов\n      dictResultsFile: cfg.dictResultsFile,\n      schemaResultsFile: cfg.schemaResultsFile,\n      reportFile: cfg.reportFile\n    });\n    i++;\n  }\n  if (i >= MAX_JOBS) break;\n}\n\nreturn jobs.map(j => ({ json: j }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        192
+      ],
+      "id": "d46697e2-84c0-421c-b1fb-f9c32a029ac5",
+      "name": "Build jobs",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "executeOnce": false,
+        "command": "=timeout 60 docker exec ffuf sh -c 'ffuf -u \"{{ $json.endpoint }}?{{ $json.param }}=FUZZ\" -w {{ $json.wordlist }} -mc all -t 100 -k -enc \"FUZZ:urlencode\" -o \"{{ $json.ffufOut }}\" -of json -s > /dev/null 2>&1'; echo \"EXIT=$?\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        16,
+        192
+      ],
+      "id": "d3a14386-6e1c-40de-aa5c-16573171c106",
+      "name": "ffuf"
+    },
+    {
+      "parameters": {
+        "executeOnce": false,
+        "command": "=timeout 60 docker exec wfuzz sh -c 'wfuzz -z file,{{ $json.wordlist }},urlencode -u \"{{ $json.endpoint }}?{{ $json.param }}=FUZZ\" -t 100 -f \"{{ $json.wfuzzOut }}\" > /dev/null 2>&1'; echo \"EXIT=$?\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "aefec753-3328-48ec-970f-a62559c10c0d",
+      "name": "wfuzz"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst path = require('path');\n\nawait new Promise(r => setTimeout(r, 2000));\n\n// ⚠️ Берём cfg из Build jobs (там есть runId и пути)\nconst jobs = $('Build jobs').all().map(item => item.json);\nconst runId = jobs[0]?.runId || '';\n\nconst normalized = [];\n\nconst files = fs.readdirSync('/results').filter(f =>\n  f.startsWith(runId) && f.includes('_ffuf_') && f.endsWith('.json')\n);\n\nconsole.log(`Parse ffuf: ${files.length} files, ${jobs.length} jobs`);\n\nfor (const file of files) {\n  try {\n    const data = JSON.parse(fs.readFileSync(path.join('/results', file), 'utf8'));\n    const results = data.results || [];\n\n    const m = file.match(/_ffuf_(\\d+)\\.json$/);\n    const idx = m ? parseInt(m[1]) : -1;\n    const job = (idx >= 0 && idx < jobs.length) ? jobs[idx] : null;\n\n    const endpoint = job ? job.endpoint : 'unknown';\n    const param = job ? job.param : `param_${idx}`;\n\n    for (const r of results) {\n      normalized.push({\n        tool: 'ffuf',\n        endpoint,\n        param,\n        payload: (r.input && r.input.FUZZ) || '',\n        status: r.status,\n        length: r.length,\n        time_ms: Math.round((r.duration || 0) / 1_000_000),\n        contentType: r['content-type'] || '',\n      });\n    }\n  } catch (e) {\n    console.error('Parse ffuf error:', file, e.message);\n  }\n}\n\nconsole.log(`Parsed ffuf: ${normalized.length} results`);\nreturn [{ json: { tool: 'ffuf', normalized }}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        192
+      ],
+      "id": "28e64cba-5d44-4092-b7c3-c2156f91c625",
+      "name": "Parse ffuf",
+      "executeOnce": true,
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst path = require('path');\n\nawait new Promise(r => setTimeout(r, 2000));\n\nconst jobs = $('Build jobs').all().map(item => item.json);\nconst runId = jobs[0]?.runId || '';\n\nconst normalized = [];\n\nconst files = fs.readdirSync('/results').filter(f =>\n  f.startsWith(runId) && f.includes('_wfuzz_') && f.endsWith('.txt')\n);\n\nconsole.log(`Parse wfuzz: ${files.length} files, ${jobs.length} jobs`);\n\nfor (const file of files) {\n  try {\n    const text = fs.readFileSync(path.join('/results', file), 'utf8');\n    const lines = text.split('\\n');\n\n    const m = file.match(/_wfuzz_(\\d+)\\.txt$/);\n    const idx = m ? parseInt(m[1]) : -1;\n    const job = (idx >= 0 && idx < jobs.length) ? jobs[idx] : null;\n\n    const endpoint = job ? job.endpoint : 'unknown';\n    const param = job ? job.param : `param_${idx}`;\n\n    for (const line of lines) {\n      const match = line.match(/^\\s*\\d+:\\s+C=(\\d+)\\s+(\\d+)\\s+L\\s+(\\d+)\\s+W\\s+(\\d+)\\s+Ch\\s+\"(.*)\"/);\n      if (!match) continue;\n\n      normalized.push({\n        tool: 'wfuzz',\n        endpoint,\n        param,\n        payload: (match[5] || '').trim(),\n        status:  parseInt(match[1]),\n        length:  parseInt(match[4]),\n        words:   parseInt(match[3]),\n        chars:   parseInt(match[4]),\n        time_ms: 0,\n        contentType: '',\n      });\n    }\n  } catch (e) {\n    console.error('Parse wfuzz error:', file, e.message);\n  }\n}\n\nconsole.log(`Parsed wfuzz: ${normalized.length} results`);\nreturn [{ json: { tool: 'wfuzz', normalized }}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        288,
+        16
+      ],
+      "id": "208f614b-7bce-4e4d-87dc-cc9ca3367d26",
+      "name": "Parse wfuzz",
+      "executeOnce": true,
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst data = $input.first().json;\n\nconst dictResults = {\n  runId: data.runId,\n  target: data.target,\n  vulnType: data.vulnType,\n  wordlist: data.wordlist,\n  useArjun: data.useArjun || false,\n  arjunStatus: data.arjunStatus || 'unknown',\n\n  ffuf:  { results: data.ffufResults  || [], total: (data.ffufResults  || []).length },\n  wfuzz: { results: data.wfuzzResults || [], total: (data.wfuzzResults || []).length },\n\n  totalResults: (data.ffufResults?.length || 0) + (data.wfuzzResults?.length || 0),\n  timestamp: new Date().toISOString(),\n\n  endpointsFile:     data.endpointsFile,\n  arjunFile:         data.arjunFile,\n  dictResultsFile:   data.dictResultsFile,\n  schemaResultsFile: data.schemaResultsFile,\n  reportFile:        data.reportFile,\n  configFile:        data.configFile,\n  baselineFile:      data.baselineFile,\n\n  // ← здесь было cfg. — исправляем на data.\n  owaspCategory: data.owaspCategory,\n  owaspName: data.owaspName,\n  startTime: data.startTime,\n};\n\nfs.writeFileSync(data.dictResultsFile, JSON.stringify(dictResults, null, 2));\n\nconsole.log(`Workflow 3 DONE. ffuf=${dictResults.ffuf.total}, wfuzz=${dictResults.wfuzz.total}, total=${dictResults.totalResults}`);\nconsole.log(`File: ${data.dictResultsFile}`);\n\nreturn [{ json: dictResults }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        816,
+        96
+      ],
+      "id": "7942b68e-731f-4898-aacf-793f3018cee8",
+      "name": "Write Dict Results",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst path = require('path');\n\nawait new Promise(r => setTimeout(r, 2000));\n\n// cfg — из Build jobs, там runId и все пути\nconst jobs = $('Build jobs').all().map(i => i.json);\nconst runId = jobs[0]?.runId || '';\nconst cfg = $('Read Files').first().json;\n\nconst ffufNorm = [];\nconst wfuzzNorm = [];\n\n// === Читаем ffuf-файлы ===\nconst ffufFiles = fs.readdirSync('/results').filter(f =>\n  f.startsWith(runId) && f.includes('_ffuf_') && f.endsWith('.json')\n);\n\nfor (const file of ffufFiles) {\n  try {\n    const data = JSON.parse(fs.readFileSync(path.join('/results', file), 'utf8'));\n    const results = data.results || [];\n    const m = file.match(/_ffuf_(\\d+)\\.json$/);\n    const idx = m ? parseInt(m[1]) : -1;\n    const job = (idx >= 0 && idx < jobs.length) ? jobs[idx] : null;\n\n    for (const r of results) {\n      ffufNorm.push({\n        tool: 'ffuf',\n        endpoint: job?.endpoint || 'unknown',\n        param:    job?.param    || `param_${idx}`,\n        payload:  (r.input && r.input.FUZZ) || '',\n        status:   r.status,\n        length:   r.length,\n        time_ms:  Math.round((r.duration || 0) / 1_000_000),\n        contentType: r['content-type'] || '',\n      });\n    }\n  } catch (e) {\n    console.error('ffuf parse error:', file, e.message);\n  }\n}\n\n// === Читаем wfuzz-файлы ===\nconst wfuzzFiles = fs.readdirSync('/results').filter(f =>\n  f.startsWith(runId) && f.includes('_wfuzz_') && f.endsWith('.txt')\n);\n\nfor (const file of wfuzzFiles) {\n  try {\n    const text = fs.readFileSync(path.join('/results', file), 'utf8');\n    const m = file.match(/_wfuzz_(\\d+)\\.txt$/);\n    const idx = m ? parseInt(m[1]) : -1;\n    const job = (idx >= 0 && idx < jobs.length) ? jobs[idx] : null;\n\n    for (const line of text.split('\\n')) {\n      const match = line.match(/^\\s*\\d+:\\s+C=(\\d+)\\s+(\\d+)\\s+L\\s+(\\d+)\\s+W\\s+(\\d+)\\s+Ch\\s+\"(.*)\"/);\n      if (!match) continue;\n      wfuzzNorm.push({\n        tool: 'wfuzz',\n        endpoint: job?.endpoint || 'unknown',\n        param:    job?.param    || `param_${idx}`,\n        payload:  (match[5] || '').trim(),\n        status:   parseInt(match[1]),\n        length:   parseInt(match[4]),\n        words:    parseInt(match[3]),\n        chars:    parseInt(match[4]),\n        time_ms:  0,\n        contentType: '',\n      });\n    }\n  } catch (e) {\n    console.error('wfuzz parse error:', file, e.message);\n  }\n}\n\nconsole.log(`Parsed: ffuf=${ffufNorm.length}, wfuzz=${wfuzzNorm.length}`);\n\nreturn [{ json: {\n  ...cfg,\n  ffufResults:  ffufNorm,\n  wfuzzResults: wfuzzNorm,\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        112
+      ],
+      "id": "3ad318fa-262f-4f13-8abb-1e08620da537",
+      "name": "Parse Dict",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1104,
+        368
+      ],
+      "id": "90f13194-22ad-48b8-b706-4f701fbd1d91",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "KtJtK7r3BUkbBVi6",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/KtJtK7r3BUkbBVi6",
+          "cachedResultName": "Schema Fuzzing"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1328,
+        112
+      ],
+      "id": "4286241c-2d39-453e-ab1a-23bd688e786d",
+      "name": "Call 'Schema Fuzzing'"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        96
+      ],
+      "id": "71942f5d-fce6-4bf4-8ee3-c4fdb985dacf",
+      "name": "Limit"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gemma:2b\",\n  \"prompt\": \"Ты — генератор тестовых строк для проверки валидации ввода. Выведи 15 строк, содержащих спецсимволы (кавычки, дефисы, слова UNION, SELECT). \\nОтветь простым текстом, каждая строка с новой строки. БЕЗ тегов ```sql, без нумерации и объяснений.\\nПример:\\n' OR 1=1 --\\nadmin' --\\n1' UNION SELECT NULL --\",\n  \"stream\": false,\n  \"options\": {\n    \"temperature\": 0.2,\n    \"num_predict\": 300,\n    \"repeat_penalty\": 1.2\n  }\n}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -640,
+        -32
+      ],
+      "id": "bf344f51-3f50-479e-8261-bbe9bcb79569",
+      "name": "Local LLM Wordlist"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst cfg = $('Read Files').first().json;\n\nconst runId = cfg.runId || 'default_run';\nconst fileName = `/seeds/ai_wordlist_${runId}.txt`;\n\ntry {\n  let llmRaw = $input.first().json.response || \"\";\n  \n  // 1. Убираем маркдаун-теги (```sql и ```)\n  llmRaw = llmRaw.replace(/```[a-z]*/gi, '').replace(/```/g, '').trim();\n\n  // 2. Разбиваем на строки\n  let lines = llmRaw.split('\\n');\n\n  // 3. Очищаем каждую строку\n  let words = lines.map(line => line.trim().replace(/^[\"']|[\"']$/g, ''))\n    .filter(word => {\n      if (!word || word.length < 2) return false;\n      if (word.toLowerCase().includes('empty')) return false;\n      return true;\n    });\n\n  // 4. Если строк меньше 3 — откат на SecLists\n  if (words.length < 3) {\n    throw new Error(`Модель выдала слишком мало строк (${words.length}).`);\n  }\n\n  // 5. Сохраняем\n  fs.writeFileSync(fileName, words.join('\\n'));\n  \n  console.log(`✅ Успешно сохранено ${words.length} строк.`);\n  console.log(`Пример: ${words[0]} | ${words[1]}`);\n\n  return [{ json: { \n    ...cfg, \n    wordlist: fileName, \n    aiGenerated: true, \n    aiWordsCount: words.length \n  }}];\n\n} catch (error) {\n  console.error(\"❌ Ошибка LLM, откат на SecLists:\", error.message);\n  return [{ json: { ...cfg, wordlist: cfg.wordlist, aiGenerated: false } }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -416,
+        -32
+      ],
+      "id": "4e65efe1-f416-475d-a6b7-c4a5dede135a",
+      "name": "Save AI Wordlist",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "collection": "runs",
+        "options": {
+          "limit": 5,
+          "sort": "{\"timestamp\": -1}\n"
+        },
+        "query": "{\n  \"target\": \"{{ $('Read Files').first().json.target }}\",\n  \"vulnType\": \"{{ $('Read Files').first().json.vulnType }}\"\n}\n"
+      },
+      "type": "n8n-nodes-base.mongoDb",
+      "typeVersion": 1.5,
+      "position": [
+        -560,
+        384
+      ],
+      "id": "eb301ab6-1a9a-46ca-bb9f-c271838ef5eb",
+      "name": "Find documents",
+      "credentials": {
+        "mongoDb": {
+          "id": "U2V6EXsWJoBvfyy8",
+          "name": "MongoDB account"
+        }
+      },
+      "disabled": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Read Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Files": {
+      "main": [
+        [
+          {
+            "node": "Local LLM Wordlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Endpoints": {
+      "main": [
+        [
+          {
+            "node": "Build jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build jobs": {
+      "main": [
+        [
+          {
+            "node": "ffuf",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "wfuzz",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ffuf": {
+      "main": [
+        [
+          {
+            "node": "Parse ffuf",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "wfuzz": {
+      "main": [
+        [
+          {
+            "node": "Parse wfuzz",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse wfuzz": {
+      "main": [
+        [
+          {
+            "node": "Parse Dict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse ffuf": {
+      "main": [
+        [
+          {
+            "node": "Parse Dict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Dict": {
+      "main": [
+        [
+          {
+            "node": "Write Dict Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Read Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Dict Results": {
+      "main": [
+        [
+          {
+            "node": "Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limit": {
+      "main": [
+        [
+          {
+            "node": "Call 'Schema Fuzzing'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local LLM Wordlist": {
+      "main": [
+        [
+          {
+            "node": "Save AI Wordlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save AI Wordlist": {
+      "main": [
+        [
+          {
+            "node": "Find documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find documents": {
+      "main": [
+        [
+          {
+            "node": "Expand Endpoints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "c1f69a77-f0a7-43e4-876c-6d6240317cf2",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e8ba1e36580f610ee135711730f78334e2d8d2defdeb3a07a80ab9e59e294d90"
+  },
+  "nodeGroups": [],
+  "id": "pozzz36GXSXsGLNe",
+  "tags": []
+}
